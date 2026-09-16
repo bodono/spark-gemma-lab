@@ -1,0 +1,27 @@
+# Dependencies and generated output
+node_modules/
+.next/
+.vinext/
+dist/
+out/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Secrets, host-specific overrides, data and local evidence
+.env*
+*.pem
+*.key
+config/*.local.json
+data/
+results/
+runtime/
+*.log
+.work/
+work/
+.openai/
+.wrangler/

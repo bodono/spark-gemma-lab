@@ -1,0 +1,63 @@
+{
+  "runtime": {
+    "name": "vLLM",
+    "version": "0.29.0",
+    "hardware_verified": false,
+    "mtp": false,
+    "quantization": "FP8 W8A8 compressed-tensors; BF16 non-quantized layers and KV cache",
+    "prefix_caching": false,
+    "thinking": false,
+    "canvas_length": 256,
+    "capacity": 4,
+    "notes": "Example configuration for the pinned native launchers. Verify runtime precision, versions and settings on your own hardware before interpreting results.",
+    "installation_verified": false,
+    "max_model_len": 8192,
+    "language_model_only": true,
+    "thinking_requested": false,
+    "reasoning_parser": "gemma4",
+    "channel_adapter": "Exact empty leading Gemma thought channel decoded for Diffusion chat; raw deltas preserved",
+    "diffusion_cudagraph_capture_tokens": "vLLM default (maximum 512)",
+    "moe_tuning": "default heuristic; trials did not establish an end-to-end gain",
+    "max_denoising_steps": 48,
+    "attention_backends": {
+      "diffusion": "TRITON_ATTN",
+      "autoregressive": "TRITON_ATTN"
+    },
+    "denoising_mode": "adaptive",
+    "diffusion_request_controls": "spark-lab-request-controls-v1",
+    "diffusion_step_metrics": "spark-diffusion-metrics-v1 live; per-request scheduler trace, commits excluded, preemption checked",
+    "diffusion_live_preview": "spark-lab-diffusion-preview-v1; opt-in actual per-step argmax canvas; demo-only; profile and warmup GPU capture disabled",
+    "canvas_controller": {
+      "ssh_host": "Spark_1",
+      "supported_lengths": [
+        64,
+        128,
+        256,
+        512
+      ],
+      "default_length": 256
+    }
+  },
+  "models": [
+    {
+      "id": "diffusion",
+      "label": "DiffusionGemma",
+      "host": "Spark_1",
+      "baseUrl": "http://127.0.0.1:18001/v1",
+      "model": "diffusiongemma-fp8",
+      "checkpoint": "RedHatAI/diffusiongemma-26B-A4B-it-FP8-dynamic",
+      "revision": "3b3dae4697494da5a290e9c0461954449e76c4f5",
+      "apiKeyEnv": "DIFFUSION_API_KEY"
+    },
+    {
+      "id": "autoregressive",
+      "label": "Gemma 4",
+      "host": "Spark_2",
+      "baseUrl": "http://127.0.0.1:18002/v1",
+      "model": "gemma4-fp8",
+      "checkpoint": "RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic",
+      "revision": "ed35d7abe5d940da41b4ff06eb482feb0be8cb44",
+      "apiKeyEnv": "GEMMA_API_KEY"
+    }
+  ]
+}

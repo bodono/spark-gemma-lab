@@ -1,0 +1,384 @@
+--- a/sampling_params.py
++++ b/sampling_params.py
+@@ -566,6 +566,13 @@
+                     "Forced diffusion steps require an explicit max-step value.",
+                     parameter=max_key, value=None,
+                 )
++        # SPARK_LAB_DIFFUSION_PREVIEW_V1: opt-in, validated before admission.
++        preview = controls.get("spark_lab_diffusion_preview", 0)
++        if type(preview) not in (int, bool) or preview not in (0, 1):
++            raise VLLMValidationError(
++                "spark_lab_diffusion_preview must be a boolean or 0/1.",
++                parameter="spark_lab_diffusion_preview", value=preview,
++            )
+         _verify_num_sequences(self.n, "n")
+         if not -2.0 <= self.presence_penalty <= 2.0:
+             raise VLLMValidationError(
+--- a/v1/worker/gpu/sample/output.py
++++ b/v1/worker/gpu/sample/output.py
+@@ -20,6 +20,12 @@
+     num_sampled: torch.Tensor | None
+     num_rejected: torch.Tensor | None = None
+     sampling_mask_tensors: SamplingMaskTensors | None = None
++    # SPARK_LAB_DIFFUSION_PREVIEW_V1: immutable GPU snapshots, never output IDs.
++    diffusion_preview_tokens: torch.Tensor | None = None
++    diffusion_preview_steps: torch.Tensor | None = None
++    diffusion_preview_committing: torch.Tensor | None = None
++    diffusion_preview_indices: list[int] | None = None
++    diffusion_preview_lengths: list[int] | None = None
+ 
+ 
+ @triton.jit
+--- a/model_executor/models/diffusion_gemma.py
++++ b/model_executor/models/diffusion_gemma.py
+@@ -1133,6 +1133,8 @@
+             max_num_reqs, dtype=torch.bool, device=device,
+         )
+         self._request_has_controls = [False] * max_num_reqs
++        # CPU-only opt-in flags, overwritten for every request/slot reuse.
++        self._request_preview = [False] * max_num_reqs
+ 
+         # Per-slot stash for logprobs computed on the converging denoise step.
+         # Populated after the post-sample kernel detects convergence; consumed
+@@ -1144,6 +1146,9 @@
+         # Every add (including resumed/preempted requests) overwrites the
+         # slot so forced settings cannot leak to a later request.
+         controls = sampling_params.extra_args or {}
++        self._request_preview[req_idx] = bool(
++            controls.get("spark_lab_diffusion_preview", 0)
++        ) and self.tp_size == 1
+         maximum = controls.get(
+             "spark_lab_diffusion_max_steps",
+             self.diffusion_states.max_denoising_steps,
+@@ -1468,7 +1473,7 @@
+                     cu_num_generated_tokens=cu_gen,
+                 )
+ 
+-        return self._build_output(
++        output = self._build_output(
+             input_batch,
+             sampled,
+             num_sampled,
+@@ -1476,3 +1481,25 @@
+             device,
+             logprobs_tensors=logprobs_tensors,
+         )
++        # SPARK_LAB_DIFFUSION_PREVIEW_V1. This is outside the compiled sampler
++        # and model CUDA graph. Advanced indexing makes independent snapshots
++        # on the main stream. AsyncOutput retains them through its existing
++        # copy event, so later canvas/slot reuse cannot corrupt a preview.
++        # No preview GPU work at all for requests without the opt-in flag.
++        preview_positions = [
++            i for i, slot in enumerate(decode_slots_np)
++            if self._request_preview[int(slot)]
++        ]
++        if preview_positions:
++            selection = async_tensor_h2d(preview_positions, device=device)
++            preview_slots = decode_slots[selection]
++            output.diffusion_preview_tokens = states.argmax_canvas[preview_slots]
++            output.diffusion_preview_steps = states.step[preview_slots]
++            output.diffusion_preview_committing = is_committing[selection]
++            output.diffusion_preview_indices = [
++                int(decode_indices_np[i]) for i in preview_positions
++            ]
++            output.diffusion_preview_lengths = [
++                int(valid_canvas_len_np[i]) for i in preview_positions
++            ]
++        return output
+--- a/v1/outputs.py
++++ b/v1/outputs.py
+@@ -5,7 +5,7 @@
+ from collections.abc import Sequence
+ from copy import copy
+ from dataclasses import dataclass, field
+-from typing import TYPE_CHECKING, NamedTuple, TypeAlias
++from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+ 
+ import numpy as np
+ import torch
+@@ -383,6 +383,8 @@
+ 
+     # ``None`` when ``return_sampling_mask`` is off.
+     sampling_masks: SamplingMaskLists | None = None
++    # SPARK_LAB_DIFFUSION_PREVIEW_V1: metadata only; no completion accounting.
++    diffusion_previews: dict[str, dict[str, Any]] | None = None
+ 
+     @staticmethod
+     def with_kv_conn_output_only(
+--- a/v1/worker/gpu/async_utils.py
++++ b/v1/worker/gpu/async_utils.py
+@@ -133,6 +133,7 @@
+         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+         self.copy_event = torch.cuda.Event(blocking=True)
+         self._has_fault: torch.Tensor | None = None
++        self.diffusion_preview_np = None
+ 
+         with stream(copy_stream, main_stream):
+             copy_stream.wait_stream(main_stream)
+@@ -162,6 +163,13 @@
+             if check_ep_fault:
+                 has_fault = get_ep_all2all_manager().query_fault()
+                 self._has_fault = has_fault.to("cpu", non_blocking=True)
++            # Same stream/event as normal output; no new blocking wait.
++            if sampler_output.diffusion_preview_tokens is not None:
++                self.diffusion_preview_np = (
++                    async_copy_to_np(sampler_output.diffusion_preview_tokens),
++                    async_copy_to_np(sampler_output.diffusion_preview_steps),
++                    async_copy_to_np(sampler_output.diffusion_preview_committing),
++                )
+             self.copy_event.record(copy_stream)
+ 
+     def get_output(self) -> ModelRunnerOutput:
+@@ -176,6 +184,15 @@
+         for token_ids, num_tokens in zip(sampled_token_ids, num_sampled_tokens):
+             del token_ids[num_tokens:]
+         self.model_runner_output.sampled_token_ids = sampled_token_ids
++        if self.diffusion_preview_np is not None:
++            from vllm.spark_lab_diffusion_preview import make_cpu_frames
++            tokens, steps, committing = self.diffusion_preview_np
++            self.model_runner_output.diffusion_previews = make_cpu_frames(
++                self.model_runner_output.req_ids,
++                self.sampler_output.diffusion_preview_indices,
++                self.sampler_output.diffusion_preview_lengths,
++                tokens.tolist(), steps.tolist(), committing.tolist(),
++            )
+ 
+         if self.sampling_mask_tensors is not None:
+             self.model_runner_output.sampling_masks = (
+--- a/v1/engine/__init__.py
++++ b/v1/engine/__init__.py
+@@ -232,6 +232,9 @@
+     # Per-request spec-decode acceptance; attached only on the final output.
+     # Appended last so `array_like` positional serialization stays compatible.
+     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
++    # Appended for msgspec array compatibility. Preview-only outputs contain
++    # no tokens, stats/events, logprobs, or finish reason.
++    diffusion_preview: dict[str, Any] | None = None
+ 
+     @property
+     def finished(self) -> bool:
+--- a/v1/core/sched/scheduler.py
++++ b/v1/core/sched/scheduler.py
+@@ -1895,6 +1895,19 @@
+             generated_token_ids = (
+                 sampled_token_ids[req_index] if sampled_token_ids else []
+             )
++            # SPARK_LAB_DIFFUSION_PREVIEW_V1: separate metadata-only output.
++            # No events/prefill stats are consumed and no generated IDs added.
++            preview = (model_runner_output.diffusion_previews or {}).get(req_id)
++            if preview is not None and not output_is_stale:
++                from vllm.spark_lab_diffusion_preview import annotate_frame
++                preview = annotate_frame(
++                    preview, req_id, request.num_output_tokens,
++                    self.vllm_config.diffusion_config.canvas_length,
++                    request.num_preemptions,
++                )
++                outputs[request.client_index].append(EngineCoreOutput(
++                    request_id=req_id, new_token_ids=[], diffusion_preview=preview,
++                ))
+ 
+             scheduled_spec_token_ids = (
+                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
+--- a/outputs.py
++++ b/outputs.py
+@@ -147,6 +147,7 @@
+         *,
+         kv_transfer_params: dict[str, Any] | None = None,
+         ec_transfer_params: dict[str, Any] | None = None,
++        diffusion_previews: list[dict[str, Any]] | None = None,
+         # Forward compatibility, code that uses args added in new release can
+         # still run with older versions of vLLM without breaking.
+         **kwargs: Any,
+@@ -169,10 +170,23 @@
+         self.num_cache_creation_tokens = num_cache_creation_tokens
+         self.kv_transfer_params = kv_transfer_params
+         self.ec_transfer_params = ec_transfer_params
++        self.diffusion_previews = diffusion_previews
+ 
+     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
+         """Merge subsequent RequestOutput into this one"""
+ 
++        # A preview-only collector item must never replace real metadata.
++        # Preserve up to 64 queued frames without unbounded network backpressure.
++        if self.diffusion_previews is not None or next_output.diffusion_previews is not None:
++            from vllm.spark_lab_diffusion_preview import merge_frames
++            pending = merge_frames(self.diffusion_previews, next_output.diffusion_previews)
++            if not self.outputs and next_output.outputs:
++                self.__dict__.update(next_output.__dict__)
++                self.diffusion_previews = pending
++                return
++            self.diffusion_previews = pending
++            if not next_output.outputs:
++                return
+         self.finished |= next_output.finished
+         self.kv_transfer_params = next_output.kv_transfer_params
+         self.ec_transfer_params = next_output.ec_transfer_params
+--- a/v1/engine/output_processor.py
++++ b/v1/engine/output_processor.py
+@@ -662,6 +662,23 @@
+                 # Ignore output for already-aborted request.
+                 continue
+ 
++            # SPARK_LAB_DIFFUSION_PREVIEW_V1: bypass token/latency accounting,
++            # detokenization, logprobs, stop checks and normal output throttling.
++            if engine_core_output.diffusion_preview is not None:
++                if req_state.output_kind != RequestOutputKind.FINAL_ONLY:
++                    preview_output = RequestOutput(
++                        request_id=req_state.external_req_id,
++                        prompt=req_state.prompt,
++                        prompt_token_ids=req_state.prompt_token_ids,
++                        prompt_logprobs=None, outputs=[], finished=False,
++                        diffusion_previews=[engine_core_output.diffusion_preview],
++                    )
++                    if req_state.queue is not None:
++                        req_state.queue.put(preview_output)
++                    else:
++                        request_outputs.append(preview_output)
++                continue
++
+             # 1) Compute stats for this iteration.
+             self._update_stats_from_output(
+                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
+--- a/entrypoints/openai/chat_completion/serving.py
++++ b/entrypoints/openai/chat_completion/serving.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+ import asyncio
++import json
+ import time
+ from collections.abc import AsyncGenerator, AsyncIterator
+ from collections.abc import Sequence as GenericSequence
+@@ -260,6 +261,18 @@
+         request: ChatCompletionRequest,
+         raw_request: Request | None = None,
+     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
++        # Preview is a private, opt-in diagnostic extension for this TP1/V2
++        # diffusion demo. Reject unsupported public request shapes early.
++        preview = (request.vllm_xargs or {}).get("spark_lab_diffusion_preview", 0)
++        if preview:
++            parallel = self.engine_client.vllm_config.parallel_config
++            if (not request.stream or (request.n or 1) != 1
++                    or not self.model_config.is_diffusion
++                    or parallel.tensor_parallel_size != 1
++                    or parallel.pipeline_parallel_size != 1):
++                return self.create_error_response(
++                    "Diffusion preview requires streamed n=1 DiffusionGemma on TP1/PP1."
++                )
+         # Streaming response
+         tokenizer = self.renderer.tokenizer
+         assert tokenizer is not None
+@@ -512,8 +525,26 @@
+         )
+ 
+         last_res: RequestOutput | None = None
++        preview_eos_ids = None
+         try:
+             async for res in result_generator:
++                # Metadata frames precede ordinary deltas, and preview-only
++                # outputs never change first-token, usage or parser state.
++                if res.diffusion_previews:
++                    from vllm.spark_lab_diffusion_preview import decode_frame, preview_eos_tokens
++                    if preview_eos_ids is None:
++                        preview_eos_ids = preview_eos_tokens(tokenizer, self.model_config)
++                    for frame in res.diffusion_previews:
++                        decoded = decode_frame(frame, tokenizer, preview_eos_ids)
++                        decoded["request_id"] = request_id
++                        data = json.dumps({
++                            "id": request_id, "object": chunk_object_type,
++                            "created": created_time, "model": model_name,
++                            "choices": [], "diffusion_preview": decoded,
++                        }, ensure_ascii=False)
++                        yield f"data: {data}\n\n"
++                    if not res.outputs:
++                        continue
+                 last_res = res
+                 if res.prompt_token_ids is not None:
+                     num_prompt_tokens = len(res.prompt_token_ids)
+--- a/spark_lab_diffusion_preview.py
++++ b/spark_lab_diffusion_preview.py
+@@ -0,0 +1,84 @@
++# SPDX-License-Identifier: Apache-2.0
++"""SPARK_LAB_DIFFUSION_PREVIEW_V1: isolated, best-effort CPU telemetry helpers.
++
++No torch operations, model math, RNG, detokenizer state or completion counters.
++"""
++from __future__ import annotations
++from typing import Any
++
++
++def make_cpu_frames(req_ids, indices, lengths, tokens, steps, committing):
++    frames = {}
++    for index, length, canvas, step, commit in zip(
++        indices, lengths, tokens, steps, committing
++    ):
++        # No prefill rows reach this helper, and commit-only rows are omitted.
++        if commit or not 1 <= step <= 48:
++            continue
++        frames[req_ids[index]] = {
++            "version": 1, "kind": "best_guess", "denoising_step": int(step),
++            "token_ids": canvas[:length], "final": False,
++            "attribution_valid": True,
++        }
++    return frames
++
++
++def annotate_frame(frame, request_id, output_tokens, canvas_length, preemptions):
++    result = dict(frame)
++    result["request_id"] = request_id
++    result["block_index"] = output_tokens // canvas_length + 1
++    if preemptions:
++        # Reset/recomputation can make a block look as if it ran twice.
++        # Invalidate the visualization for this request instead of guessing.
++        result.update(attribution_valid=False, reason="request_preempted",
++                      token_ids=[], text="")
++    return result
++
++
++def merge_frames(first, second):
++    merged = list(first or ()) + list(second or ())
++    if len(merged) > 64:
++        dropped = len(merged) - 64
++        prior = sum(f.get("dropped_frames", 0) for f in merged[:dropped])
++        merged = merged[-64:]
++        merged[0] = dict(merged[0])
++        merged[0]["dropped_frames"] = merged[0].get("dropped_frames", 0) + dropped + prior
++    return merged
++
++
++def preview_eos_tokens(tokenizer: Any, model_config: Any):
++    """Resolve once per request; never read model generation config per frame."""
++    eos = set()
++    try:
++        values = [getattr(tokenizer, "eos_token_id", None),
++                  getattr(model_config.hf_text_config, "eos_token_id", None)]
++        try:
++            values.append(model_config.try_get_generation_config().get("eos_token_id"))
++        except Exception:
++            pass  # Tokenizer/HF EOS still provide a useful display boundary.
++        for value in values:
++            if isinstance(value, int):
++                eos.add(value)
++            elif isinstance(value, (list, tuple)):
++                eos.update(value)
++    except Exception:
++        pass  # Best-effort display metadata must not interrupt generation.
++    return eos
++
++
++def decode_frame(frame: dict[str, Any], tokenizer: Any, eos_token_ids):
++    result = dict(frame)
++    if not result.get("attribution_valid", True):
++        result["text"] = ""
++        return result
++    try:
++        # Keep the full canvas for audit. Only its display text stops at EOS;
++        # a later provisional frame can revise the EOS position.
++        ids = result["token_ids"]
++        end = next((i for i, token in enumerate(ids) if token in eos_token_ids), len(ids))
++        result["text"] = tokenizer.decode(ids[:end], skip_special_tokens=True)
++    except Exception:
++        # Telemetry failure must never abort generation or alter final text.
++        result.update(attribution_valid=False, reason="preview_decode_failed",
++                      token_ids=[], text="")
++    return result

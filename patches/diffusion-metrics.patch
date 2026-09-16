@@ -1,0 +1,149 @@
+--- a/vllm/config/vllm.py
++++ b/vllm/config/vllm.py
+@@ -1338,10 +1338,11 @@
+         if (
+             self.observability_config.per_request_spec_decode_metrics != "none"
+             and self.speculative_config is None
++            and (self.model_config is None or not self.model_config.is_diffusion)
+         ):
+             raise ValueError(
+                 "--per-request-spec-decode-metrics requires speculative decoding "
+-                "to be enabled (via --speculative-config)."
++                "or a diffusion model."
+             )
+ 
+         if (
+--- a/vllm/v1/metrics/stats.py
++++ b/vllm/v1/metrics/stats.py
+@@ -328,6 +328,9 @@
+     num_draft_tokens: int = 0
+     per_step_accepted: list[int] = field(default_factory=list)
+     per_step_drafted: list[int] = field(default_factory=list)
++    # Spark lab telemetry: nonzero only on detached diffusion snapshots.
++    diffusion_trace_version: int = 0
++    diffusion_num_preemptions: int = 0
+ 
+     @classmethod
+     def new(cls, num_spec_tokens: int) -> "RequestSpecDecodeMetrics":
+@@ -344,6 +347,18 @@
+         if detailed:
+             self.per_step_accepted.append(num_accepted)
+             self.per_step_drafted.append(num_draft_tokens)
++
++    def diffusion_snapshot(self, num_preemptions: int):
++        """Detach mutable lists before transport while generation continues."""
++        return RequestSpecDecodeMetrics(
++            num_spec_tokens=self.num_spec_tokens,
++            histogram=list(self.histogram),
++            num_draft_tokens=self.num_draft_tokens,
++            per_step_accepted=list(self.per_step_accepted),
++            per_step_drafted=list(self.per_step_drafted),
++            diffusion_trace_version=1,
++            diffusion_num_preemptions=num_preemptions,
++        )
+ 
+     def to_dict(self) -> dict[str, Any]:
+         """Payload matching ``SpeculativeDecodingMetrics`` for the response.
+@@ -367,6 +382,9 @@
+             "num_draft_tokens": self.num_draft_tokens,
+             "num_spec_tokens": self.num_spec_tokens,
+         }
++        if self.diffusion_trace_version:
++            result["diffusion_trace_version"] = self.diffusion_trace_version
++            result["diffusion_num_preemptions"] = self.diffusion_num_preemptions
+         if self.per_step_accepted:
+             result["per_step_accepted"] = self.per_step_accepted
+             result["per_step_drafted"] = self.per_step_drafted
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -2100,7 +2100,15 @@
+                         events=request.take_events(),
+                         prefill_stats=prefill_stats,
+                         spec_decode_metrics=(
+-                            request.spec_decode_metrics
++                            request.spec_decode_metrics.diffusion_snapshot(
++                                request.num_preemptions
++                            )
++                            if (
++                                self.vllm_config.model_config.is_diffusion
++                                and request.spec_decode_metrics is not None
++                                and (True)
++                            )
++                            else request.spec_decode_metrics
+                             if finish_reason is not None
+                             else None
+                         ),
+--- a/vllm/entrypoints/generate/base/protocol.py
++++ b/vllm/entrypoints/generate/base/protocol.py
+@@ -50,6 +50,8 @@
+     # Ordered per-verify-step arrays; populated only at the `detailed` level.
+     per_step_accepted: list[int] | None = None
+     per_step_drafted: list[int] | None = None
++    diffusion_trace_version: int | None = None
++    diffusion_num_preemptions: int | None = None
+ 
+ 
+ class PerRequestMetrics(OpenAIBaseModel):
+--- a/vllm/v1/engine/output_processor.py
++++ b/vllm/v1/engine/output_processor.py
+@@ -437,7 +437,14 @@
+             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
+             finish_reason=str(finish_reason) if finished else None,
+             stop_reason=stop_reason if finished else None,
+-            spec_decode_metrics=self.spec_decode_metrics if finished else None,
++            spec_decode_metrics=(
++                self.spec_decode_metrics
++                if finished or (
++                    self.spec_decode_metrics is not None
++                    and self.spec_decode_metrics.diffusion_trace_version == 1
++                )
++                else None
++            ),
+         )
+ 
+     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
+--- a/vllm/outputs.py
++++ b/vllm/outputs.py
+@@ -194,6 +194,11 @@
+                         )
+                         completion.finish_reason = next_completion.finish_reason
+                         completion.stop_reason = next_completion.stop_reason
++                        # Keep the newest cumulative trace when chunks coalesce.
++                        if next_completion.spec_decode_metrics is not None:
++                            completion.spec_decode_metrics = (
++                                next_completion.spec_decode_metrics
++                            )
+                     else:
+                         # Replace the output with the new one
+                         self.outputs[i] = next_completion
+--- a/vllm/entrypoints/openai/completion/serving.py
++++ b/vllm/entrypoints/openai/completion/serving.py
+@@ -437,6 +437,13 @@
+                             total_tokens=prompt_tokens + completion_tokens,
+                         )
+ 
++                    if (self.model_config.is_diffusion and num_prompts == 1
++                            and (request.n or 1) == 1):
++                        diffusion_stats = build_spec_decoding_metrics(res)
++                        if diffusion_stats is not None:
++                            chunk.metrics = PerRequestMetrics(
++                                speculative_decoding=diffusion_stats
++                            )
+                     response_json = chunk.model_dump_json(exclude_unset=True)
+                     yield f"data: {response_json}\n\n"
+ 
+--- a/vllm/entrypoints/openai/chat_completion/serving.py
++++ b/vllm/entrypoints/openai/chat_completion/serving.py
+@@ -810,6 +810,12 @@
+                             ),
+                         )
+ 
++                    if self.model_config.is_diffusion and (request.n or 1) == 1:
++                        diffusion_stats = build_spec_decoding_metrics(res)
++                        if diffusion_stats is not None:
++                            chunk.metrics = PerRequestMetrics(
++                                speculative_decoding=diffusion_stats
++                            )
+                     data = chunk.model_dump_json(exclude_unset=True)
+                     yield f"data: {data}\n\n"
+ 

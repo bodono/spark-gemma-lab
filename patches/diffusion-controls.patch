@@ -1,0 +1,145 @@
+--- a/model_executor/models/diffusion_gemma.py
++++ b/model_executor/models/diffusion_gemma.py
+@@ -507,6 +507,9 @@
+     sc_vocab_end: int,
+     tp_size: int,
+     tp_group_name: str,
++    # SPARK_LAB_REQUEST_CONTROLS_V1: None preserves native scalar path.
++    request_max_denoising_steps: torch.Tensor | None = None,
++    request_force_denoising_steps: torch.Tensor | None = None,
+ ) -> torch.Tensor:
+     """Compiled decode step: temperature → Gumbel sample → probs/confidence →
+     accept/renoise → convergence, all as vectorized PyTorch ops.
+@@ -518,8 +521,15 @@
+ 
+     # ---- Phase 1: Temperature schedule ----
+     steps_f = step_tensor[decode_slots].float()
+-    remaining = (max_denoising_steps - steps_f).clamp(min=1.0)
+-    temp = t_min + (t_max - t_min) * (remaining / max_denoising_steps)
++    if request_max_denoising_steps is None:
++        # Preserve the native arithmetic for default adaptive requests.
++        remaining = (max_denoising_steps - steps_f).clamp(min=1.0)
++        temp = t_min + (t_max - t_min) * (remaining / max_denoising_steps)
++    else:
++        # An explicit budget also sets this request's temperature horizon.
++        request_limits = request_max_denoising_steps[decode_slots].float()
++        remaining = (request_limits - steps_f).clamp(min=1.0)
++        temp = t_min + (t_max - t_min) * (remaining / request_limits)
+ 
+     # ---- Phase 2: Temperature scaling + Gumbel-max sampling ----
+     logits_3d = logits.reshape(num_decode, CL, -1).float()
+@@ -617,9 +627,16 @@
+     stable = mismatch == 0
+ 
+     step_after = step_tensor[decode_slots]
+-    converged = (stable & confident_tensor[decode_slots] & (new_hist_len >= ST)) | (
+-        step_after >= max_denoising_steps
+-    )
++    if request_max_denoising_steps is None:
++        converged = (stable & confident_tensor[decode_slots] & (new_hist_len >= ST)) | (
++            step_after >= max_denoising_steps
++        )
++    else:
++        # Only explicit force=1 suppresses the stability/confidence exit.
++        early_converged = (stable & confident_tensor[decode_slots]
++                           & (new_hist_len >= ST))
++        early_converged = early_converged & ~request_force_denoising_steps[decode_slots]
++        converged = early_converged | (step_after >= request_limits)
+     # Commit done → denoise next (False); denoise converged → commit next (True)
+     is_encoder_phase[decode_slots] = torch.where(
+         is_commit, is_commit.new_zeros(num_decode), converged
+@@ -1106,12 +1123,37 @@
+         self._query_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+         self._num_logits = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+ 
++        # SPARK_LAB_REQUEST_CONTROLS_V1: persistent slot tensors.
++        # CPU flags select the native path without inspecting GPU state.
++        self._request_max_denoising_steps = torch.full(
++            (max_num_reqs,), diffusion_states.max_denoising_steps,
++            dtype=torch.int32, device=device,
++        )
++        self._request_force_denoising_steps = torch.zeros(
++            max_num_reqs, dtype=torch.bool, device=device,
++        )
++        self._request_has_controls = [False] * max_num_reqs
++
+         # Per-slot stash for logprobs computed on the converging denoise step.
+         # Populated after the post-sample kernel detects convergence; consumed
+         # on the subsequent commit step when num_sampled=CANVAS_LEN.
+         self._pending_logprobs: dict[int, LogprobsTensors] = {}
+ 
+     def add_request(self, req_idx: int, prompt_len: int, sampling_params: Any) -> None:
++        # Validated by SamplingParams._verify_args before engine admission.
++        # Every add (including resumed/preempted requests) overwrites the
++        # slot so forced settings cannot leak to a later request.
++        controls = sampling_params.extra_args or {}
++        maximum = controls.get(
++            "spark_lab_diffusion_max_steps",
++            self.diffusion_states.max_denoising_steps,
++        )
++        force = bool(controls.get("spark_lab_diffusion_force_steps", 0))
++        self._request_max_denoising_steps[req_idx].fill_(maximum)
++        self._request_force_denoising_steps[req_idx].fill_(force)
++        self._request_has_controls[req_idx] = (
++            maximum != self.diffusion_states.max_denoising_steps or force
++        )
+         if use_penalty(sampling_params):
+             logger.warning_once(
+                 "DiffusionGemma does not support repetition/frequency/presence "
+@@ -1331,6 +1373,11 @@
+             end_req = min(start_req + group, num_decode)
+             tile = slice(start_req, end_req)
+             tile_slots = decode_slots[tile]
++            # Small CPU-only lookup, one flag per request in this tile.
++            use_request_controls = any(
++                self._request_has_controls[int(slot)]
++                for slot in decode_slots_np[start_req:end_req]
++            )
+ 
+             scaled = _compiled_sample_step(
+                 logits[start_req * CL : end_req * CL],
+@@ -1366,6 +1413,12 @@
+                 sc_vocab_end=self.sc_vocab_end,
+                 tp_size=self.tp_size,
+                 tp_group_name=self.tp_group_name,
++                request_max_denoising_steps=(
++                    self._request_max_denoising_steps if use_request_controls else None
++                ),
++                request_force_denoising_steps=(
++                    self._request_force_denoising_steps if use_request_controls else None
++                ),
+             )
+ 
+             # Logprobs for denoise steps that just converged (is_encoder_phase
+--- a/sampling_params.py
++++ b/sampling_params.py
+@@ -543,6 +543,29 @@
+             self.skip_reading_prefix_cache = self.prompt_logprobs is not None
+ 
+     def _verify_args(self) -> None:
++        # SPARK_LAB_REQUEST_CONTROLS_V1: validate before engine admission.
++        controls = self.extra_args or {}
++        max_key = "spark_lab_diffusion_max_steps"
++        force_key = "spark_lab_diffusion_force_steps"
++        if max_key in controls:
++            maximum = controls[max_key]
++            if type(maximum) is not int or not 1 <= maximum <= 48:
++                raise VLLMValidationError(
++                    "spark_lab_diffusion_max_steps must be an integer in [1, 48].",
++                    parameter=max_key, value=maximum,
++                )
++        if force_key in controls:
++            force = controls[force_key]
++            if type(force) not in (int, bool) or force not in (0, 1):
++                raise VLLMValidationError(
++                    "spark_lab_diffusion_force_steps must be 0 or 1.",
++                    parameter=force_key, value=force,
++                )
++            if force and max_key not in controls:
++                raise VLLMValidationError(
++                    "Forced diffusion steps require an explicit max-step value.",
++                    parameter=max_key, value=None,
++                )
+         _verify_num_sequences(self.n, "n")
+         if not -2.0 <= self.presence_penalty <= 2.0:
+             raise VLLMValidationError(
