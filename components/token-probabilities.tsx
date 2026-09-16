@@ -1,4 +1,12 @@
-import type { CSSProperties, ReactNode } from 'react';
+'use client';
+
+import { useId, type CSSProperties, type ReactNode } from 'react';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 export type TokenProbability = {
   index: number;
@@ -66,6 +74,7 @@ export function TokenProbabilityText({
   data?: TokenProbabilities;
   kind?: 'autoregressive' | 'diffusion';
 }) {
+  const tooltipId = useId();
   if (!data || data.status === 'invalid' || data.offset_unit !== 'utf16')
     return text;
   const pieces: ReactNode[] = [];
@@ -94,27 +103,54 @@ export function TokenProbabilityText({
       kind === 'diffusion'
         ? 'After the diffusion temperature schedule and token filtering; not a measure of factual accuracy.'
         : 'Before temperature / top-p; not a measure of factual accuracy.';
-    const title = records.every((record) => record != null)
+    const description = records.every((record) => record != null)
       ? `${records.length > 1 ? 'This text combines multiple token fragments; shown without a single color.\n' : ''}${probabilityLabel}${records.length > 1 ? 's' : ''}:\n${records.map((record) => describeToken(record!)).join('\n')}\n${probabilityNote}`
       : 'Token probability unavailable';
     pieces.push(
-      <span
+      <TooltipTrigger
         key={`${span.start}:${span.end}`}
+        render={(props, state) => (
+          <span
+            {...props}
+            aria-describedby={state.open ? tooltipId : undefined}
+          />
+        )}
+        tabIndex={0}
+        payload={description}
+        closeOnClick={false}
         className={
           colored
             ? 'probability-token'
             : 'probability-token probability-neutral'
         }
         style={colored ? probabilityStyle(single.probability!) : undefined}
-        title={title}
       >
         {text.slice(span.start, span.end)}
-      </span>,
+      </TooltipTrigger>,
     );
     end = span.end;
   }
   pieces.push(text.slice(end));
-  return pieces;
+  // One popup per response; stable triggers remain mounted as output streams in.
+  return (
+    <TooltipProvider delay={100}>
+      <Tooltip>
+        {({ payload }) => (
+          <>
+            {pieces}
+            <TooltipContent
+              id={tooltipId}
+              role="tooltip"
+              className="probability-tooltip"
+              sideOffset={8}
+            >
+              {typeof payload === 'string' ? payload : null}
+            </TooltipContent>
+          </>
+        )}
+      </Tooltip>
+    </TooltipProvider>
+  );
 }
 
 export function TokenProbabilityLegend({
@@ -145,7 +181,7 @@ export function TokenProbabilityLegend({
             : data
               ? 'Probabilities unavailable for this response; text stays uncolored.'
               : 'Run a comparison to collect token probabilities.'
-          : 'Hover a token for its probability. Unscored tokens stay neutral.'}
+          : 'Hover or focus a token for its probability. Unscored tokens stay neutral.'}
       </span>
       <small>
         {kind === 'diffusion'
