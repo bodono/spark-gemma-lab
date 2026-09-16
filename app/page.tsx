@@ -1005,6 +1005,40 @@ export default function Home() {
           <div className="profile-grid">
             <section className="profile-controls">
               <h2>Measure the frontier</h2>
+              <div className="twocol">
+                <label htmlFor="profile-input-length">
+                  Input length (tokens)
+                  <Input
+                    id="profile-input-length"
+                    type="number"
+                    min={1}
+                    max={Math.max(1, contextBudget - tokens)}
+                    step={1}
+                    placeholder="Original length"
+                    value={inputTokens}
+                    onChange={(e) => setInputTokens(e.target.value)}
+                    disabled={running}
+                    aria-describedby="input-length-help"
+                  />
+                </label>
+                <label htmlFor="profile-output-length">
+                  Output limit (tokens)
+                  <Input
+                    id="profile-output-length"
+                    type="number"
+                    min={1}
+                    max={contextBudget - 1}
+                    value={tokens}
+                    onChange={(e) => setTokens(+e.target.value)}
+                    disabled={running}
+                  />
+                </label>
+              </div>
+              <p className="method-note" id="input-length-help">
+                Set input length to trim or repeat the source text before timing.
+                Leave blank for its original length. Chat formatting adds tokens;
+                actual totals appear in the results.
+              </p>
               <p>
                 Matched prompts, warmups, repeated waves. Live diffusion
                 previews are always disabled here, including during warmups.
@@ -1098,39 +1132,8 @@ export default function Home() {
                   />
                 </label>
               </div>
-              <div className="twocol">
-                <label>
-                  Input text tokens
-                  <Input
-                    type="number"
-                    min={1}
-                    max={Math.max(1, contextBudget - tokens)}
-                    step={1}
-                    placeholder="Original length"
-                    value={inputTokens}
-                    onChange={(e) => setInputTokens(e.target.value)}
-                    disabled={running}
-                    aria-describedby="input-length-help"
-                  />
-                </label>
-                <label>
-                  Maximum output tokens
-                  <Input
-                    type="number"
-                    min={1}
-                    max={contextBudget - 1}
-                    value={tokens}
-                    onChange={(e) => setTokens(+e.target.value)}
-                    disabled={running}
-                  />
-                </label>
-              </div>
-              <p className="method-note" id="input-length-help">
-                Leave input length blank to use the original text. A set length
-                repeats shorter sources or trims longer ones to that many
-                tokens, before timing starts. Instructions and chat formatting
-                add tokens; the table reports each model’s actual total. Input,
-                formatting and output must fit the {fmt(contextBudget, 0)}-token
+              <p className="method-note">
+                Input, formatting and output must fit the {fmt(contextBudget, 0)}-token
                 context. Repeated excerpts are recorded as repeated text, not
                 longer book passages.
               </p>
