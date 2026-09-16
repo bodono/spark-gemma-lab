@@ -860,7 +860,7 @@ export default function Home() {
           <span>
             2 × NVIDIA DGX Spark
             <br />
-            <small>One model per GB10 · MTP disabled</small>
+            <small>One model per GB10</small>
           </span>
         </div>
       </div>
@@ -1280,7 +1280,7 @@ export default function Home() {
                     {r?.status === 'complete'
                       ? `${fmt(r.completion_tokens, 0)} output tokens · ${r.finish_reason || 'complete'}`
                       : r?.status || 'Idle'}
-                    <span className="footer-right">FP8 W8A8 · no MTP</span>
+                    <span className="footer-right">FP8 W8A8</span>
                   </footer>
                 </article>
               );
