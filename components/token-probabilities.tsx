@@ -60,9 +60,11 @@ function splitsSurrogate(text: string, offset: number) {
 export function TokenProbabilityText({
   text,
   data,
+  kind = 'autoregressive',
 }: {
   text: string;
   data?: TokenProbabilities;
+  kind?: 'autoregressive' | 'diffusion';
 }) {
   if (!data || data.status === 'invalid' || data.offset_unit !== 'utf16')
     return text;
@@ -84,8 +86,16 @@ export function TokenProbabilityText({
     const records = span.token_indexes.map((index) => tokens.get(index));
     const single = records.length === 1 ? records[0] : undefined;
     const colored = single && validProbability(single.probability);
+    const probabilityLabel =
+      kind === 'diffusion'
+        ? 'Final denoising probability of selected token'
+        : 'Raw model probability of selected token';
+    const probabilityNote =
+      kind === 'diffusion'
+        ? 'After the diffusion temperature schedule and token filtering; not a measure of factual accuracy.'
+        : 'Before temperature / top-p; not a measure of factual accuracy.';
     const title = records.every((record) => record != null)
-      ? `${records.length > 1 ? 'This text combines multiple token fragments; shown without a single color.\n' : ''}Raw model probability of selected token${records.length > 1 ? 's' : ''}:\n${records.map((record) => describeToken(record!)).join('\n')}\nBefore temperature / top-p; not a measure of factual accuracy.`
+      ? `${records.length > 1 ? 'This text combines multiple token fragments; shown without a single color.\n' : ''}${probabilityLabel}${records.length > 1 ? 's' : ''}:\n${records.map((record) => describeToken(record!)).join('\n')}\n${probabilityNote}`
       : 'Token probability unavailable';
     pieces.push(
       <span
@@ -110,9 +120,11 @@ export function TokenProbabilityText({
 export function TokenProbabilityLegend({
   data,
   running,
+  kind = 'autoregressive',
 }: {
   data?: TokenProbabilities;
   running: boolean;
+  kind?: 'autoregressive' | 'diffusion';
 }) {
   const missing =
     !data || data.status === 'unavailable' || data.status === 'invalid';
@@ -136,7 +148,9 @@ export function TokenProbabilityLegend({
           : 'Hover a token for its probability. Unscored tokens stay neutral.'}
       </span>
       <small>
-        Raw model likelihood of each selected token, before temperature / top-p.
+        {kind === 'diffusion'
+          ? 'Final denoising probability, after the diffusion temperature schedule and token filtering. '
+          : 'Raw model likelihood of each selected token, before temperature / top-p. '}
         Not factual confidence.
       </small>
     </div>

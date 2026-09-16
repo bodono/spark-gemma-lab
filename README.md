@@ -6,7 +6,7 @@ Run DiffusionGemma and autoregressive Gemma 4 side by side on two NVIDIA DGX Spa
 - Batch size defaults to 1 and is configurable as concurrent requests.
 - Adaptive diffusion demos with actual steps reported for each committed block.
 - Optional live intermediate predictions, clearly separated from committed output.
-- AR token probabilities: translucent red → orange → green highlights with exact values on hover.
+- Committed-token probabilities for both models: translucent red → orange → green highlights with exact values on hover.
 - Configurable prompt, input/output lengths and diffusion canvas size.
 - Profiling sweeps, PG19 preparation, JSON/JSONL evidence, CSV and plots.
 
@@ -97,7 +97,7 @@ For a production UI build, use `npm run build` followed by `npm start`. Both com
 
 These are instruction-tuned, non-MTP checkpoints. Quantized layers use FP8 W8A8 compressed tensors; remaining layers and the KV cache use BF16. The native launcher uses Triton attention and MoE, FP8 linear kernels, Model Runner V2, compilation and CUDA graphs. It is an experimental baseline, not a claim of peak hardware performance.
 
-The [native launcher](scripts/serve-spark-user.sh) applies three reviewed local patches: [request controls](scripts/patch_diffusion_controls.py), [per-block metrics](scripts/patch_diffusion_metrics.py) and [live previews](scripts/patch_diffusion_preview.py). They require vLLM 0.29.0 and matching source hashes, keep backups, and refuse unknown source changes. They are not upstream vLLM features. Updating vLLM requires reviewing and updating the patches.
+The [native launcher](scripts/serve-spark-user.sh) applies reviewed local patches for [request controls](scripts/patch_diffusion_controls.py), [per-block metrics](scripts/patch_diffusion_metrics.py), [live previews](scripts/patch_diffusion_preview.py) and [batched diffusion probability attribution](scripts/patch_diffusion_probabilities.py). They require vLLM 0.29.0 and matching source hashes, keep backups, and refuse unknown source changes. They are not upstream vLLM features. Updating vLLM requires reviewing and updating the patches.
 
 The supplied Docker alternative is uninstrumented and does not provide the managed canvas/preview/counting workflow described here. Use the native setup for the full application.
 
@@ -114,6 +114,10 @@ Live previews display provisional token predictions and may add latency. They ne
 **Token probabilities** is enabled by default for AR demos. Each sampled token gets a translucent box on a continuous probability scale: red at 0%, orange at 50%, green at 100%. Hover to inspect the exact probability and log probability. These are `exp(logprob)` from vLLM's raw model distribution, before temperature/top-k/top-p; they describe the likelihood of the selected token, not whether the answer is correct. The bridge requests `logprobs: true, top_logprobs: 0` only for demo AR requests. Turn the checkbox off to omit collection. Profiling and all warmups always omit it, and demo timings include any collection overhead.
 
 Token boundaries need not match words. Output text and spacing stay unchanged; missing scores or unverified text alignment stay neutral. If several token fragments decode into one Unicode character, its hover readout lists the contributing probabilities without inventing a single character probability. Selected-token records and their verified text spans are included in the exported run.
+
+Diffusion's **Final token probabilities** toggle is also enabled by default for demos. Committed blocks receive the same red/orange/green scale; the provisional live preview keeps its purple animation. These scores come from the final converging denoising pass, after the diffusion temperature schedule and top-k/top-p filtering, conditioned on the current canvas and prefix. They are distinct from AR's raw next-token distribution and are often close to 100% after convergence. Hover labels identify the source; the display never stretches the color scale to manufacture contrast. Collection uses vLLM's existing selected-token logprobs and adds no extra model forward pass. Profiling and all warmups disable both models' probability collection.
+
+The native probability patch fixes a vLLM 0.29.0 batching issue: a committing request could otherwise drain another request's newly converged probability buffer before that request commits. It releases only buffers belonging to requests committing in the current step. The added work stays inside the opt-in logprobs branch. Restart the managed Diffusion server with the updated launcher after installing this patch; the local bridge/UI update alone does not update a running model process.
 
 ## Profile and plot
 

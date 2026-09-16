@@ -47,6 +47,7 @@ export async function collectCompletion(
     previewEnabled = false,
     emitPreview = () => {},
     tokenProbabilitiesEnabled = false,
+    tokenProbabilitiesKind = 'ar',
     emitTokenProbabilities = () => {},
     stripEmptyGemmaChannel = false,
     denoisingOptions = null,
@@ -61,7 +62,8 @@ export async function collectCompletion(
   const maxSteps = denoisingOptions?.max_steps ?? 48;
   const emptyChannel = '<|channel>thought\n<channel|>';
   let pendingPrefix = '',
-    inspectPrefix = stripEmptyGemmaChannel;
+    inspectPrefix = stripEmptyGemmaChannel,
+    strippedPrefix = false;
   let text = '',
     reasoning = '',
     first = null,
@@ -70,7 +72,24 @@ export async function collectCompletion(
     finishReason = null,
     terminal = false;
   const probabilities = tokenProbabilitiesEnabled
-    ? createTokenProbabilities(emitTokenProbabilities)
+    ? createTokenProbabilities(emitTokenProbabilities, {
+        kind: tokenProbabilitiesKind,
+        hiddenPrefixTokens:
+          tokenProbabilitiesKind === 'diffusion' && stripEmptyGemmaChannel
+            ? [
+                { token_id: 100, token: '<|channel>' },
+                { token_id: 45518, token: 'thought' },
+                { token_id: 107, token: '\n' },
+                { token_id: 101, token: '<channel|>' },
+              ]
+            : [],
+        // The pinned Gemma tokenizer's EOS is omitted from visible chat text.
+        // vLLM's diffusion path reports finish_reason=stop, stop_reason=null.
+        hiddenTerminalTokens:
+          tokenProbabilitiesKind === 'diffusion'
+            ? [{ token_id: 1, token: '<eos>' }]
+            : [],
+      })
     : null;
   const chunks = [],
     tokenProgress = [],
@@ -125,7 +144,8 @@ export async function collectCompletion(
         )
           content = '';
         else {
-          content = pendingPrefix.startsWith(emptyChannel)
+          strippedPrefix = pendingPrefix.startsWith(emptyChannel);
+          content = strippedPrefix
             ? pendingPrefix.slice(emptyChannel.length)
             : pendingPrefix;
           pendingPrefix = '';
@@ -259,7 +279,10 @@ export async function collectCompletion(
         chunks.push(metadata);
         emit(metadata);
       }
-      probabilities?.observe(choice, text);
+      probabilities?.observe(choice, text, {
+        prefixPending: inspectPrefix,
+        prefixStripped: strippedPrefix,
+      });
     }
     if (pendingPrefix) {
       const at = now() - start;
@@ -328,7 +351,16 @@ export async function collectCompletion(
         }
       : {}),
     ...(probabilities
-      ? { ar_token_probabilities: probabilities.finish(text) }
+      ? {
+          [tokenProbabilitiesKind === 'diffusion'
+            ? 'diffusion_token_probabilities'
+            : 'ar_token_probabilities']: probabilities.finish(text, {
+            presentation: {
+              prefixPending: false,
+              prefixStripped: strippedPrefix,
+            },
+          }),
+        }
       : {}),
     chunks,
     ...(previewEnabled

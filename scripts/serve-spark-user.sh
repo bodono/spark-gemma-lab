@@ -46,6 +46,10 @@ runtime="$HOME/.local/share/spark-gemma-lab/venv"
 [[ -x "$runtime/bin/vllm" ]] || { echo 'Run install-spark-user.sh first' >&2; exit 2; }
 if [[ $role == diffusion ]]; then
  patch_dir="$(dirname "$0")"
+ diffusion_module=$("$runtime/bin/python" -c 'from importlib.util import find_spec; from pathlib import Path; print(Path(find_spec("vllm").origin).parent / "model_executor/models/diffusion_gemma.py")')
+ if grep -q 'SPARK_LAB_DIFFUSION_PROBABILITIES_V1' "$diffusion_module"; then
+  "$runtime/bin/python" "$patch_dir/patch_diffusion_probabilities.py" --revert --output-dir "$HOME/.local/share/spark-gemma-lab/probabilities-patch-evidence"
+ fi
  preview_helper=$("$runtime/bin/python" -c 'from importlib.util import find_spec; from pathlib import Path; print(Path(find_spec("vllm").origin).with_name("spark_lab_diffusion_preview.py"))')
  if [[ -f "$preview_helper" ]]; then
   "$runtime/bin/python" "$patch_dir/patch_diffusion_preview.py" --revert --output-dir "$HOME/.local/share/spark-gemma-lab/preview-patch-evidence"
@@ -53,6 +57,7 @@ if [[ $role == diffusion ]]; then
  "$runtime/bin/python" "$patch_dir/patch_diffusion_controls.py" --apply --output-dir "$HOME/.local/share/spark-gemma-lab/patch-evidence"
  "$runtime/bin/python" "$patch_dir/patch_diffusion_metrics.py" --apply --mode live
  "$runtime/bin/python" "$patch_dir/patch_diffusion_preview.py" --apply --output-dir "$HOME/.local/share/spark-gemma-lab/preview-patch-evidence"
+ "$runtime/bin/python" "$patch_dir/patch_diffusion_probabilities.py" --apply --output-dir "$HOME/.local/share/spark-gemma-lab/probabilities-patch-evidence"
 extra+=(--per-request-spec-decode-metrics detailed)
 fi
 export VLLM_USE_V2_MODEL_RUNNER=1

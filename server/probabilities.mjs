@@ -4,12 +4,25 @@ const descriptor = {
   logprobs_mode: 'raw',
   offset_unit: 'utf16',
 };
+const probabilityDescriptor = (kind) =>
+  kind === 'diffusion'
+    ? {
+        ...descriptor,
+        logprobs_mode: 'final_denoising',
+        probability_semantics:
+          'Final converging denoising-pass probabilities after the configured diffusion temperature, top-k and top-p filters, conditioned on the current canvas and prefix.',
+      }
+    : descriptor;
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
 // vLLM returns UTF-8 bytes of its incrementally decoded token string, not raw
 // tokenizer byte fragments. Empty decoded tokens belong with the next visible
 // token; their separate conditional probabilities must remain separate.
-export function createTokenProbabilities(emit = () => {}) {
+export function createTokenProbabilities(
+  emit = () => {},
+  { kind = 'ar', hiddenPrefixTokens = [], hiddenTerminalTokens = [] } = {},
+) {
+  const metadata = probabilityDescriptor(kind);
   const tokens = [],
     spans = [],
     candidates = [],
@@ -22,7 +35,10 @@ export function createTokenProbabilities(emit = () => {}) {
     nextToken = 0,
     invalid = null,
     lastState = null,
-    attributionGap = false;
+    attributionGap = false,
+    prefixPending = false,
+    prefixStripped = false,
+    prefixVerified = false;
   const state = (final) => {
     if (invalid) return { status: 'invalid', reason: invalid };
     if (!tokens.length)
@@ -76,6 +92,36 @@ export function createTokenProbabilities(emit = () => {}) {
   };
   const align = (final = false) => {
     if (invalid) return;
+    // The presentation layer must first prove that the complete prefix was
+    // removed at absolute response start. Its token IDs AND decoded strings
+    // must then match before any probability record can be hidden.
+    if (prefixPending) return;
+    if (prefixStripped && !prefixVerified) {
+      if (!hiddenPrefixTokens.length || nextToken !== 0) {
+        invalid =
+          'The hidden response prefix could not be attributed to tokens.';
+        return;
+      }
+      for (
+        let i = 0;
+        i < Math.min(tokens.length, hiddenPrefixTokens.length);
+        i++
+      ) {
+        const expected = hiddenPrefixTokens[i];
+        if (
+          tokens[i].token_id !== expected.token_id ||
+          tokens[i].token !== expected.token
+        ) {
+          invalid =
+            'The hidden response prefix does not match its verified token IDs and text.';
+          return;
+        }
+      }
+      if (tokens.length < hiddenPrefixTokens.length) return;
+      for (let i = 0; i < hiddenPrefixTokens.length; i++) omitted.push(i);
+      nextToken = hiddenPrefixTokens.length;
+      prefixVerified = true;
+    }
     while (nextToken < tokens.length) {
       const token = tokens[nextToken];
       const remaining = text.slice(cursor);
@@ -119,7 +165,7 @@ export function createTokenProbabilities(emit = () => {}) {
       invalid
     ) {
       emit({
-        ...descriptor,
+        ...metadata,
         ...status,
         tokens: tokens.slice(tokenStart),
         spans: spans.slice(spanStart),
@@ -132,10 +178,12 @@ export function createTokenProbabilities(emit = () => {}) {
     }
   };
   return {
-    observe(choice, visibleText) {
+    observe(choice, visibleText, presentation = {}) {
       const tokenStart = tokens.length,
         spanStart = spans.length;
       text = visibleText;
+      prefixPending = presentation.prefixPending === true;
+      prefixStripped = presentation.prefixStripped === true;
       const raw = choice?.logprobs?.content;
       const visibleDelta = choice?.delta?.content ?? choice?.text ?? '';
       if (
@@ -207,9 +255,14 @@ export function createTokenProbabilities(emit = () => {}) {
           if (
             i === raw.length - 1 &&
             choice?.finish_reason === 'stop' &&
-            Number.isInteger(choice?.stop_reason) &&
             idsMatch &&
-            token.token_id === choice.stop_reason
+            ((Number.isInteger(choice?.stop_reason) &&
+              token.token_id === choice.stop_reason) ||
+              hiddenTerminalTokens.some(
+                (expected) =>
+                  token.token_id === expected.token_id &&
+                  token.token === expected.token,
+              ))
           )
             stopEligible.add(token.index);
         }
@@ -217,10 +270,14 @@ export function createTokenProbabilities(emit = () => {}) {
       align();
       notify(tokenStart, spanStart);
     },
-    finish(visibleText, { interrupted = false } = {}) {
+    finish(visibleText, { interrupted = false, presentation } = {}) {
       const tokenStart = tokens.length,
         spanStart = spans.length;
       text = visibleText;
+      if (presentation) {
+        prefixPending = presentation.prefixPending === true;
+        prefixStripped = presentation.prefixStripped === true;
+      }
       align(true);
       const status =
         interrupted && !invalid
@@ -232,7 +289,7 @@ export function createTokenProbabilities(emit = () => {}) {
           : state(true);
       notify(tokenStart, spanStart, true, status);
       return {
-        ...descriptor,
+        ...metadata,
         ...status,
         tokens,
         spans,
@@ -254,9 +311,9 @@ export function appendProbabilityDelta(previous, delta) {
   if (metadata.reason === undefined) delete snapshot.reason;
   return snapshot;
 }
-export function interruptedProbabilities(previous) {
+export function interruptedProbabilities(previous, { kind = 'ar' } = {}) {
   return {
-    ...descriptor,
+    ...probabilityDescriptor(kind),
     ...previous,
     status:
       previous?.status === 'invalid'

@@ -14,7 +14,7 @@ graphs=${EXTEND_DIFFUSION_GRAPHS:-0};tuned=${USE_TUNED_MOE:-0};attention=${ATTEN
 case "$attention" in TRITON_ATTN|FLASHINFER) ;; *) exit 2;;esac
 [[ $capacity =~ ^[0-9]+$ && $busy =~ ^[01]$ ]] || { echo 'Invalid launch environment' >&2;exit 2; }
 ssh "$target" 'mkdir -p .local/share/spark-gemma-lab'
-scp scripts/install-spark-user.sh scripts/install-python-headers.sh scripts/serve-spark-user.sh scripts/canvas-runtime.py scripts/verify_runtime.py scripts/patch_diffusion_controls.py scripts/patch_diffusion_metrics.py scripts/patch_diffusion_preview.py "$target:.local/share/spark-gemma-lab/"
+scp scripts/install-spark-user.sh scripts/install-python-headers.sh scripts/serve-spark-user.sh scripts/canvas-runtime.py scripts/verify_runtime.py scripts/patch_diffusion_controls.py scripts/patch_diffusion_metrics.py scripts/patch_diffusion_preview.py scripts/patch_diffusion_probabilities.py "$target:.local/share/spark-gemma-lab/"
 if [[ $mode == prepare ]]; then
  ssh "$target" 'bash .local/share/spark-gemma-lab/install-spark-user.sh'
  ssh "$target" 'chmod go-w .local/share/spark-gemma-lab .local/share/spark-gemma-lab/venv/bin/vllm'

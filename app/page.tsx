@@ -62,6 +62,7 @@ type DenoisingSettings = {
   denoising_steps?: number;
   diffusion_preview?: boolean;
   ar_token_probabilities?: boolean;
+  diffusion_token_probabilities?: boolean;
   input_tokens?: number | null;
   canvas_length?: number;
 };
@@ -99,6 +100,7 @@ type Result = {
   preview?: DiffusionPrediction;
   previewUnavailable?: string;
   ar_token_probabilities?: TokenProbabilities;
+  diffusion_token_probabilities?: TokenProbabilities;
   diffusion_preview?: {
     enabled: boolean;
     received_frames: number;
@@ -235,6 +237,8 @@ export default function Home() {
   const [runSynthetic, setRunSynthetic] = useState(false);
   const [liveDiffusionPreview, setLiveDiffusionPreview] = useState(true);
   const [showTokenProbabilities, setShowTokenProbabilities] = useState(true);
+  const [showDiffusionTokenProbabilities, setShowDiffusionTokenProbabilities] =
+    useState(true);
   const [activePreview, setActivePreview] = useState(false);
   const [previewRun, setPreviewRun] = useState(0);
   const [contextBudget, setContextBudget] = useState(8192);
@@ -539,6 +543,8 @@ export default function Home() {
           output_mode: outputMode,
           diffusion_preview: wantPreview,
           ar_token_probabilities: kind === 'demo' && showTokenProbabilities,
+          diffusion_token_probabilities:
+            kind === 'demo' && showDiffusionTokenProbabilities,
           ...denoising,
         }),
       });
@@ -606,7 +612,7 @@ export default function Home() {
               );
             if (
               e.type === 'token_probabilities' &&
-              e.model === 'autoregressive'
+              (e.model === 'autoregressive' || e.model === 'diffusion')
             )
               setResults((previous) =>
                 previous.map((result) => {
@@ -617,9 +623,13 @@ export default function Home() {
                     result.status !== 'running'
                   )
                     return result;
+                  const field =
+                    e.model === 'diffusion'
+                      ? 'diffusion_token_probabilities'
+                      : 'ar_token_probabilities';
                   return {
                     ...result,
-                    ar_token_probabilities: {
+                    [field]: {
                       version: e.version,
                       status: e.status,
                       reason: e.reason,
@@ -627,11 +637,11 @@ export default function Home() {
                       logprobs_mode: e.logprobs_mode,
                       offset_unit: e.offset_unit,
                       tokens: [
-                        ...(result.ar_token_probabilities?.tokens ?? []),
+                        ...(result[field]?.tokens ?? []),
                         ...(e.tokens ?? []),
                       ],
                       spans: [
-                        ...(result.ar_token_probabilities?.spans ?? []),
+                        ...(result[field]?.spans ?? []),
                         ...(e.spans ?? []),
                       ],
                     },
@@ -1119,6 +1129,24 @@ export default function Home() {
                           Token probabilities
                         </label>
                       )}
+                      {m.id === 'diffusion' && (
+                        <label
+                          className="animation-toggle probability-toggle"
+                          title="Color committed tokens by their final denoising probabilities. Always disabled for profiling."
+                        >
+                          <input
+                            type="checkbox"
+                            checked={showDiffusionTokenProbabilities}
+                            disabled={busy}
+                            onChange={(event) =>
+                              setShowDiffusionTokenProbabilities(
+                                event.target.checked,
+                              )
+                            }
+                          />
+                          Final token probabilities
+                        </label>
+                      )}
                     </div>
                   </div>
                   <div className="metrics">
@@ -1167,6 +1195,13 @@ export default function Home() {
                           <TokenProbabilityText
                             text={r?.text ?? ''}
                             data={r?.ar_token_probabilities}
+                          />
+                        ) : m.id === 'diffusion' &&
+                          showDiffusionTokenProbabilities ? (
+                          <TokenProbabilityText
+                            text={r?.text ?? ''}
+                            data={r?.diffusion_token_probabilities}
+                            kind="diffusion"
                           />
                         ) : (
                           r?.text
@@ -1226,6 +1261,13 @@ export default function Home() {
                       running={r?.status === 'running'}
                     />
                   )}
+                  {m.id === 'diffusion' && showDiffusionTokenProbabilities && (
+                    <TokenProbabilityLegend
+                      data={r?.diffusion_token_probabilities}
+                      running={r?.status === 'running'}
+                      kind="diffusion"
+                    />
+                  )}
                   <footer>
                     <span
                       className={
@@ -1267,9 +1309,10 @@ export default function Home() {
             these can change until a block is committed and do not count as
             output tokens or first committed output. Demo timings include any
             preview overhead{displayedPreview ? ' (enabled for this demo)' : ''}
-            . AR token colors show raw model probabilities, with red for low,
-            orange for intermediate and green for high likelihood. Hover for
-            exact values. Demo timings include probability collection when
+            . Token colors show raw model probabilities for AR and final
+            denoising probabilities for committed diffusion output, with red
+            for low, orange for intermediate and green for high likelihood.
+            Hover for exact values. Demo timings include probability collection when
             enabled. Profiling always disables previews and token probability
             collection. The after-first-block rate excludes prefill and the
             entire first output block; it is unavailable for a single block.
