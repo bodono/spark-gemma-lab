@@ -455,6 +455,10 @@ export default function Home() {
     }
   }
   async function execute(kind: string) {
+    if (!Number.isFinite(temp) || temp < 0) {
+      setError('AR temperature must be a finite number greater than or equal to 0');
+      return;
+    }
     const requestedInput =
       kind === 'profile' && inputTokens !== '' ? Number(inputTokens) : null;
     if (
@@ -969,7 +973,6 @@ export default function Home() {
                   aria-label="Gemma 4 temperature"
                   type="number"
                   min={0}
-                  max={2}
                   step={0.1}
                   value={temp}
                   onChange={(e) => setTemp(+e.target.value)}

@@ -66,10 +66,9 @@ export function validate(input) {
   if (
     typeof x.temperature !== 'number' ||
     !Number.isFinite(x.temperature) ||
-    x.temperature < 0 ||
-    x.temperature > 2
+    x.temperature < 0
   )
-    throw Error('temperature must be between 0 and 2');
+    throw Error('AR temperature must be a finite number greater than or equal to 0');
   x.dataset =
     input.kind === 'profile' && Array.isArray(input.dataset)
       ? input.dataset
@@ -275,7 +274,7 @@ export async function runExperiment(
         canvas_note:
           'Native Diffusion canvas length is verified before timing. Changes restart only the owned Diffusion server and trigger an unmeasured warmup; other sizes are experimental. AR is unaffected.',
         sampler_note:
-          'Temperature and seed apply only to AR. Diffusion uses its required schedule; vLLM rejects these per-request overrides.',
+          'Temperature and seed apply only to AR. Its native temperature validation ceiling is patched to allow finite nonnegative values above 2. Diffusion uses its own temperature schedule and does not use a request-specific random seed.',
         probability_note:
           'Optional token probabilities are demo-only and may add overhead. AR uses raw sampled-token model log probabilities. Diffusion uses final converging denoising-pass probabilities after its configured temperature/top-k/top-p filters, conditioned on the current canvas and prefix; these differ from AR probabilities. Profiling and all warmups omit logprobs. Display spans require exact text attribution; they are not probabilities of correctness.',
         preview_note:

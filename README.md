@@ -105,7 +105,9 @@ The supplied Docker alternative is uninstrumented and does not provide the manag
 
 Edit the prompt, batch size and output limit, then select **Run comparison**. For multiple requests, select the request index to inspect the corresponding pair. Output appears at the cadence received from each server; diffusion can commit an entire block at once.
 
-The demo uses adaptive convergence with a **maximum of 48 denoising steps per block**. Actual counts are shown as each block commits; the configured maximum is never substituted for an observed count. Temperature and seed controls apply only to AR because DiffusionGemma requires its own sampler schedule.
+The demo uses adaptive convergence with a **maximum of 48 denoising steps per block**. Actual counts are shown as each block commits; the configured maximum is never substituted for an observed count. Temperature and seed controls apply only to AR. DiffusionGemma uses its own temperature schedule, and its current sampler does not use a request-specific random seed.
+
+**AR temperature** accepts any finite, nonnegative value, including 3 or 100; 0 uses greedy decoding. The [AR temperature patch](scripts/patch_ar_temperature.py) removes vLLM 0.29.0's upper validation limit of 2 on the dedicated AR runtime, preserving finite/nonnegative checks and sampling behavior. The AR launcher applies it with version/source-hash checks and a backup. Restart AR with the updated launcher after installing it; an unpatched server still rejects values above 2. The same values work through the profiling CLI. Diffusion's sampler is unchanged.
 
 Canvas size defaults to **256 tokens**, with 8, 16, 32, 64, 128 and 512 available in both demo and profiling views. Changing it reloads the owned Diffusion server and warms the new runtime before measurement; allow a few minutes. Nondefault sizes are experimental. AR is unaffected. The output limit and canvas size are separate settings.
 

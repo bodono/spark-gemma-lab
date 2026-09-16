@@ -44,6 +44,9 @@ capacity=${MAX_NUM_SEQS:-4}
 [[ $capacity =~ ^[0-9]+$ ]] && ((capacity>=1 && capacity<=128)) || { echo 'MAX_NUM_SEQS must be 1–128' >&2; exit 2; }
 runtime="$HOME/.local/share/spark-gemma-lab/venv"
 [[ -x "$runtime/bin/vllm" ]] || { echo 'Run install-spark-user.sh first' >&2; exit 2; }
+if [[ $role == autoregressive ]]; then
+ "$runtime/bin/python" "$(dirname "$0")/patch_ar_temperature.py" --apply --output-dir "$HOME/.local/share/spark-gemma-lab/ar-temperature-patch-evidence"
+fi
 if [[ $role == diffusion ]]; then
  patch_dir="$(dirname "$0")"
  diffusion_module=$("$runtime/bin/python" -c 'from importlib.util import find_spec; from pathlib import Path; print(Path(find_spec("vllm").origin).parent / "model_executor/models/diffusion_gemma.py")')

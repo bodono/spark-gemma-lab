@@ -271,6 +271,17 @@ test('validation rejects pathological settings and short corpus', () => {
     /Dataset needs/,
   );
 });
+test('AR temperature accepts high finite values and rejects invalid values', () => {
+  for (const temperature of [0, 0.1, 2, 2.1, 3, 10, 100]) {
+    assert.equal(validate({ ...settings, temperature }).temperature, temperature);
+  }
+  for (const temperature of [-0.1, NaN, Infinity, -Infinity, '3', null]) {
+    assert.throws(
+      () => validate({ ...settings, temperature }),
+      /AR temperature must be a finite number greater than or equal to 0/,
+    );
+  }
+});
 test('both endpoints dispatch same prompts concurrently with a real stream fixture', async () => {
   const sent = [];
   let release;
@@ -301,6 +312,7 @@ test('diffusion omits unsupported sampler overrides in chat and raw profiling re
     const r = await runExperiment(
       validate({
         ...settings,
+        temperature: 100,
         kind,
         batch_size: 1,
         batch_sizes: [1],
@@ -334,7 +346,7 @@ test('diffusion omits unsupported sampler overrides in chat and raw profiling re
     const a = sent.find((x) => x.body.model === 'a').body;
     assert.equal(Object.hasOwn(d, 'temperature'), false);
     assert.equal(Object.hasOwn(d, 'seed'), false);
-    assert.equal(a.temperature, 0);
+    assert.equal(a.temperature, 100);
     assert.equal(a.seed, 42);
     assert.equal(d.max_tokens, a.max_tokens);
     assert.equal(d.ignore_eos, kind === 'profile' ? true : undefined);

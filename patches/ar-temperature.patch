@@ -1,0 +1,17 @@
+--- a/sampling_params.py
++++ b/sampling_params.py
+@@ -574,12 +574,8 @@
+                 parameter="temperature",
+                 value=self.temperature,
+             )
+-        if self.temperature > 2.0:
+-            raise VLLMValidationError(
+-                f"temperature must be in [0, 2], got {self.temperature}.",
+-                parameter="temperature",
+-                value=self.temperature,
+-            )
++        # SPARK_LAB_AR_TEMPERATURE_V1: allow high-temperature AR experiments.
++        # The finite and nonnegative checks above remain in force.
+         if not 0.0 < self.top_p <= 1.0:
+             raise VLLMValidationError(
+                 f"top_p must be in (0, 1], got {self.top_p}.",

@@ -10,8 +10,8 @@ In particular, `scripts/patch_diffusion_preview.py` embeds compressed original
 and modified vLLM files so it can verify exact source hashes and apply or revert
 changes. Upstream copyright and SPDX notices are preserved in those payloads.
 The vLLM-derived source, including modifications for per-request controls,
-block metrics, intermediate diffusion previews and committed-token probability
-attribution, remains under Apache-2.0;
+block metrics, intermediate diffusion previews, committed-token probability
+attribution and the AR temperature limit, remains under Apache-2.0;
 it is not relicensed by the root MIT license. See `LICENSES/Apache-2.0.txt`.
 The readable changes are in `patches/`.
 
