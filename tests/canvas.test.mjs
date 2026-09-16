@@ -53,12 +53,12 @@ test('both views default to 256 and reject unsupported canvas lengths', () => {
   for (const kind of ['demo', 'profile']) {
     const input = { ...base, kind, batch_sizes: [1], warmups: 0, repeats: 1 };
     assert.equal(validate(input).canvas_length, 256);
-    for (const canvas_length of [64, 128, 256, 512])
+    for (const canvas_length of [8, 16, 32, 64, 128, 256, 512])
       assert.equal(
         validate({ ...input, canvas_length }).canvas_length,
         canvas_length,
       );
-    for (const canvas_length of [0, 32, 129, 1024, 1.5, '128'])
+    for (const canvas_length of [0, 4, 12, 24, 129, 1024, 1.5, '8', '128'])
       assert.throws(
         () => validate({ ...input, canvas_length }),
         /canvas_length/,
@@ -83,21 +83,60 @@ test('128-token blocks align partial final output; any wrong runtime width is in
       'invalid',
     );
 });
-test('512-token metrics exclude the entire first block; one block has no generation-only rate', async () => {
-  for (const blocks of [1, 2]) {
-    let time = 0;
-    const r = await collectCompletion(sse(frames(512, blocks)).body, {
-      start: 0,
-      now: () => (time += 100),
-      denoisingOptions: { canvas_length: 512, max_tokens: 1024 },
-    });
-    assert.equal(r.first_block_tokens, 512);
-    assert.equal(r.post_first_block_tps, blocks === 1 ? null : 5120);
-    assert.equal(r.denoising.status, 'available');
+test('small and large canvas metrics exclude the entire first block; one block has no generation-only rate', async () => {
+  for (const canvas of [8, 16, 32, 512]) {
+    for (const blocks of [1, 2]) {
+      let time = 0;
+      const r = await collectCompletion(sse(frames(canvas, blocks)).body, {
+        start: 0,
+        now: () => (time += 100),
+        denoisingOptions: { canvas_length: canvas, max_tokens: canvas * 2 },
+      });
+      assert.equal(r.first_block_tokens, canvas);
+      assert.equal(r.post_first_block_tps, blocks === 1 ? null : canvas * 10);
+      assert.equal(r.denoising.status, 'available');
+    }
+  }
+});
+test('small native canvases retain verified blocks and disable previews throughout profiling', async () => {
+  for (const canvas of [8, 16, 32]) {
+    const payloads = [];
+    const run = await runExperiment(
+      validate({
+        ...base,
+        kind: 'profile',
+        batch_sizes: [1],
+        repeats: 1,
+        warmups: 1,
+        canvas_length: canvas,
+        max_tokens: canvas * 2,
+        diffusion_preview: true,
+        output_mode: 'fixed',
+      }),
+      config,
+      {
+        signal: new AbortController().signal,
+        emit() {},
+        prepareRuntime: async () => verified(canvas),
+        fetcher: async (_url, opts) => {
+          payloads.push(JSON.parse(opts.body));
+          return sse(frames(canvas));
+        },
+      },
+    );
+    assert.equal(run.status, 'complete');
+    assert.equal(payloads.length, 2, 'one warmup and one measured request');
+    assert.ok(
+      payloads.every((p) => p.vllm_xargs.spark_lab_diffusion_preview === 0),
+    );
+    assert.ok(run.results.every((r) => r.canvas_length_ok));
+    assert.equal(run.results[0].denoising.blocks.length, 2);
+    assert.equal(run.results[0].denoising.canvas_length, canvas);
+    assert.equal(run.results[0].first_block_tokens, canvas);
   }
 });
 test('preview bounds track canvas and output budget', async () => {
-  for (const canvas of [64, 128, 512]) {
+  for (const canvas of [8, 16, 32, 64, 128, 512]) {
     const preview = (block, ids) => ({
       diffusion_preview: {
         version: 1,

@@ -6,7 +6,7 @@ mode=${2:?Choose prepare or serve}
 case "$role" in diffusion) target=Spark_1;; autoregressive) target=Spark_2;; *) echo 'Unknown role' >&2;exit 2;;esac
 case "$mode" in prepare|serve) ;; *) echo 'Choose prepare or serve' >&2;exit 2;;esac
 canvas=${CANVAS_LENGTH:-256}
-case "$canvas" in 64|128|256|512) ;; *) exit 2;; esac
+case "$canvas" in 8|16|32|64|128|256|512) ;; *) exit 2;; esac
 capacity=${MAX_NUM_SEQS:-4};busy=${ALLOW_BUSY:-0}
 graphs=${EXTEND_DIFFUSION_GRAPHS:-0};tuned=${USE_TUNED_MOE:-0};attention=${ATTENTION_BACKEND:-TRITON_ATTN};steps=${MAX_DENOISING_STEPS:-48};profiler=${ENABLE_TORCH_PROFILER:-0}
 [[ $steps =~ ^[0-9]+$ ]] || exit 2

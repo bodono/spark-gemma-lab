@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { once } from 'node:events';
 import http from 'node:http';
@@ -61,12 +61,25 @@ test('bridge API: host/origin protection, streaming, export, locking and cancell
       403,
     );
     assert.equal((await fetch(base + '/api/config')).status, 200);
+    assert.deepEqual(
+      await fetch(base + '/api/activity').then((r) => r.json()),
+      { active: false, progress: null },
+    );
     const response = await fetch(base + '/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
     assert.equal(response.status, 200);
+    const activity = await fetch(base + '/api/activity').then((r) => r.json());
+    assert.equal(activity.active, true);
+    assert.equal(activity.progress.kind, 'profile');
+    assert.equal(activity.progress.total_requests, 12);
+    assert.equal(activity.progress.warmup_total_requests, 6);
+    assert(
+      ['preparing', 'warmup', 'measuring'].includes(activity.progress.stage),
+    );
+    assert(!JSON.stringify(activity.progress).includes('fixture'));
     const blocked = await fetch(base + '/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -74,15 +87,28 @@ test('bridge API: host/origin protection, streaming, export, locking and cancell
     });
     assert.equal(blocked.status, 409);
     let run;
+    const progressEvents = [];
     for await (const s of parseSSE(response.body)) {
       const e = JSON.parse(s);
       if (e.type === 'complete') run = e.run;
+      if (e.type === 'progress') progressEvents.push(e.progress);
     }
     assert.ok(run);
     assert.equal(run.synthetic, true);
     assert.equal(run.results.length, 12);
     assert.equal(run.warmup_results.length, 6);
     assert.equal(run.summaries.length, 4);
+    const finished = await fetch(base + '/api/activity').then((r) => r.json());
+    assert.equal(finished.active, false);
+    assert.equal(finished.progress.stage, 'complete');
+    assert.equal(finished.progress.run_id, run.id);
+    assert.equal(finished.progress.completed_requests, 12);
+    assert.equal(finished.progress.warmup_completed_requests, 6);
+    assert.equal(finished.progress.failed_requests, 0);
+    assert(progressEvents.some((p) => p.stage === 'preparing'));
+    assert(progressEvents.some((p) => p.stage === 'warmup'));
+    assert(progressEvents.some((p) => p.stage === 'measuring'));
+    assert.equal(progressEvents.at(-1).stage, 'complete');
     const saved = await fetch(base + '/api/runs/' + run.id).then((r) =>
       r.json(),
     );
@@ -130,26 +156,147 @@ test('bridge API: host/origin protection, streaming, export, locking and cancell
           result.request_payload.messages[0].content === unicodePrompt,
       ),
     );
-    const controller = new AbortController();
+    const activityNow = () =>
+      fetch(base + '/api/activity').then((r) => r.json());
+    const waitForIdle = async () => {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const current = await activityNow();
+        if (!current.active) return current;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw Error('Bridge did not settle');
+    };
+    const cancel = (started_at) =>
+      fetch(base + '/api/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ started_at }),
+      });
+    assert.equal(
+      (await cancel(finished.progress.started_at)).status,
+      409,
+      'no active run is benign',
+    );
+
+    // Refreshing the owner closes its SSE connection, but profiling continues.
+    const owner = new AbortController();
+    const disconnected = await fetch(base + '/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...payload,
+        batch_sizes: [1],
+        warmups: 0,
+        repeats: 4,
+      }),
+      signal: owner.signal,
+    });
+    assert.equal(disconnected.status, 200);
+    const disconnectedStart = await activityNow();
+    owner.abort();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(
+      (await activityNow()).active,
+      true,
+      'profile must survive owner disconnect',
+    );
+    const recovered = await waitForIdle();
+    assert.equal(
+      recovered.progress.started_at,
+      disconnectedStart.progress.started_at,
+    );
+    assert.equal(recovered.progress.stage, 'complete');
+    assert.equal(recovered.progress.completed_requests, 8);
+    const recoveredRun = await fetch(
+      base + '/api/runs/' + recovered.progress.run_id,
+    ).then((r) => r.json());
+    assert.equal(recoveredRun.status, 'complete');
+    assert.equal(recoveredRun.results.length, 8);
+
     const cancelled = await fetch(base + '/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...payload, repeats: 100 }),
-      signal: controller.signal,
     });
-    await cancelled.body.getReader().read();
-    controller.abort();
+    const current = await activityNow();
+    assert.notEqual(current.progress.started_at, recovered.progress.started_at);
+    assert.equal(
+      (await cancel(recovered.progress.started_at)).status,
+      409,
+      'a stale tab cannot cancel the next run',
+    );
+    assert.equal((await activityNow()).active, true);
+    assert.equal(
+      (await activityNow()).progress.started_at,
+      current.progress.started_at,
+    );
+    assert.equal(
+      (
+        await fetch(base + '/api/cancel', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: 'https://evil.example',
+          },
+          body: JSON.stringify({ started_at: current.progress.started_at }),
+        })
+      ).status,
+      403,
+    );
+    assert.equal(
+      (
+        await fetch(base + '/api/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        })
+      ).status,
+      400,
+    );
+    assert.equal((await cancel(current.progress.started_at)).status, 202);
     let abortedRun;
-    for (let attempt = 0; attempt < 50 && !abortedRun; attempt++) {
-      await new Promise((r) => setTimeout(r, 20));
-      for (const f of (await readdir(results)).filter(
-        (f) => f.endsWith('.json') && f !== run.id + '.json',
-      )) {
-        const x = JSON.parse(await readFile(path.join(results, f), 'utf8'));
-        if (x.status === 'cancelled') abortedRun = x;
-      }
+    for await (const raw of parseSSE(cancelled.body)) {
+      const event = JSON.parse(raw);
+      if (event.type === 'complete') abortedRun = event.run;
     }
-    assert.ok(abortedRun, 'client cancellation is saved');
+    assert.equal(
+      abortedRun.status,
+      'cancelled',
+      'explicit cancellation reaches the owning SSE connection',
+    );
+    const cancelledActivity = await waitForIdle();
+    assert.equal(cancelledActivity.progress.stage, 'cancelled');
+    assert.equal(cancelledActivity.progress.run_id, abortedRun.id);
+    assert.equal(
+      cancelledActivity.progress.completed_requests,
+      abortedRun.results.length,
+    );
+    assert.equal(
+      cancelledActivity.progress.warmup_completed_requests,
+      abortedRun.warmup_results.length,
+    );
+    assert(
+      cancelledActivity.progress.completed_requests <
+        cancelledActivity.progress.total_requests,
+    );
+    assert.equal((await cancel(current.progress.started_at)).status, 409);
+
+    // Demos continue to cancel when their owning browser disconnects.
+    const demoOwner = new AbortController();
+    await fetch(base + '/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, kind: 'demo' }),
+      signal: demoOwner.signal,
+    });
+    demoOwner.abort();
+    const demoCancelled = await waitForIdle();
+    assert.equal(demoCancelled.progress.kind, 'demo');
+    assert.equal(demoCancelled.progress.stage, 'cancelled');
+    const demoRun = await fetch(
+      base + '/api/runs/' + demoCancelled.progress.run_id,
+    ).then((r) => r.json());
+    assert.equal(demoRun.status, 'cancelled');
     const invalid = await fetch(base + '/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -165,9 +312,20 @@ test('bridge API: host/origin protection, streaming, export, locking and cancell
     const errors = [];
     for await (const raw of parseSSE(preparationFailure.body))
       errors.push(JSON.parse(raw));
-    assert.equal(errors.length, 1);
-    assert.equal(errors[0].type, 'error');
-    assert.match(errors[0].message, /real tokenizer endpoints/);
+    const failure = errors.find((e) => e.type === 'error');
+    assert.match(failure.message, /real tokenizer endpoints/);
+    assert(
+      errors.some(
+        (e) => e.type === 'progress' && e.progress.stage === 'inputs',
+      ),
+    );
+    const failedActivity = await fetch(base + '/api/activity').then((r) =>
+      r.json(),
+    );
+    assert.equal(failedActivity.active, false);
+    assert.equal(failedActivity.progress.stage, 'error');
+    assert.equal(failedActivity.progress.completed_requests, 0);
+    assert.equal(failedActivity.progress.run_id, undefined);
     assert.equal((await fetch(base + '/api/health')).status, 200);
   } finally {
     server.kill('SIGTERM');

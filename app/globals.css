@@ -590,6 +590,105 @@ h2 span {
   grid-template-columns: 340px minmax(0, 1fr);
   gap: 20px;
 }
+.run-progress-container {
+  margin-bottom: 20px;
+  scroll-margin-top: 20px;
+}
+.run-progress {
+  padding: 20px 24px;
+  border: 1px solid #cbb9e3;
+  border-left: 4px solid #7951ad;
+  border-radius: 10px;
+  background: #faf8fe;
+}
+.run-progress.complete {
+  border-color: #96c7ae;
+  background: #f4fbf7;
+}
+.run-progress.error,
+.run-progress.cancelled {
+  border-color: #d99f85;
+  background: #fff8f3;
+}
+.run-progress-heading,
+.run-progress-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.run-progress-heading {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.run-progress-heading strong {
+  font-size: 17px;
+}
+.run-progress-time {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  color: #536171;
+}
+.run-progress-message {
+  margin: 10px 0 15px;
+  font-size: 14px;
+}
+.run-progress-bar [data-slot='progress-track'] {
+  height: 8px;
+  background: #e7def1;
+}
+.run-progress-bar [data-slot='progress-indicator'] {
+  background: #7951ad;
+  transition: width 0.25s;
+}
+.run-progress.complete [data-slot='progress-indicator'] {
+  background: #2b8257;
+}
+.run-progress-bar.indeterminate [data-slot='progress-indicator'] {
+  width: 35% !important;
+  animation: progress-slide 1.5s ease-in-out infinite;
+}
+.run-progress-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin-top: 14px;
+  font-size: 14px;
+  color: #536171;
+  font-variant-numeric: tabular-nums;
+}
+.run-progress-counts strong {
+  color: #26323d;
+}
+.run-progress-failures {
+  color: #a3412a;
+}
+.run-progress-note {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: #536171;
+}
+.progress-spinner {
+  animation: progress-spin 1s linear infinite;
+}
+@keyframes progress-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes progress-slide {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(390%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-spinner,
+  .run-progress-bar.indeterminate [data-slot='progress-indicator'] {
+    animation: none;
+  }
+}
 .profile-controls {
   padding: 24px;
   display: flex;

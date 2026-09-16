@@ -106,7 +106,7 @@ Edit the prompt, batch size and output limit, then select **Run comparison**. Fo
 
 The demo uses adaptive convergence with a **maximum of 48 denoising steps per block**. Actual counts are shown as each block commits; the configured maximum is never substituted for an observed count. Temperature and seed controls apply only to AR because DiffusionGemma requires its own sampler schedule.
 
-Canvas size defaults to **256 tokens**, with 64, 128 and 512 available in both demo and profiling views. Changing it reloads the owned Diffusion server and warms the new runtime before measurement; allow a few minutes. Nondefault sizes are experimental. AR is unaffected. The output limit and canvas size are separate settings.
+Canvas size defaults to **256 tokens**, with 8, 16, 32, 64, 128 and 512 available in both demo and profiling views. Changing it reloads the owned Diffusion server and warms the new runtime before measurement; allow a few minutes. Nondefault sizes are experimental. AR is unaffected. The output limit and canvas size are separate settings.
 
 Live previews display provisional token predictions and may add latency. They never count as completion tokens or first visible committed output. Turn previews off for cleaner timing comparisons. Profiling and all warmups always disable preview capture.
 
@@ -150,6 +150,9 @@ Plot a saved run, replacing `RUN_ID` with the ID printed by the CLI:
 ```
 
 The plotter exports throughput/latency plots, CSV summaries and actual denoising-step distributions. Synthetic data require an explicit `--allow-synthetic` flag and are watermarked.
+
+### Sweep progress
+Starting a sweep brings a progress panel into view. It shows model preparation, input preparation, warmups and measured requests, with elapsed time and separate warmup/measurement counters. Preparation is indeterminate; the measured percentage counts finished requests across both models, including failed requests, which are marked separately. Profiling continues if its browser tab refreshes or disconnects; the page reconnects to `/api/activity` and loads the saved results when the sweep finishes. Use **Stop sweep** to cancel. Progress reporting does not enable diffusion previews during profiling.
 
 ## Interpret the measurements
 

@@ -87,6 +87,46 @@ class RuntimeTests(unittest.TestCase):
             ensured=self.r.ensure(128)
         self.assertFalse(ensured['changed']);self.assertEqual(ensured['config_hash'],status['config_hash'])
 
+    def test_smallest_canvas_transition_and_new_lengths(self):
+        self.f.serving(256)
+        self.f.process(70003,['python','training.py'],parent=1,start='103',state='T')
+        signals=[]
+        def terminate(api,engine=False):
+            signals.append((api['pid'],engine))
+            shutil.rmtree(self.f.proc/str(api['pid']))
+            (self.f.proc/'net/tcp').write_text('header\n')
+        def launch(args,**kwargs):
+            self.assertEqual(args,['/bin/bash',str(self.r.launcher),'diffusion'])
+            self.assertEqual(kwargs['env']['CANVAS_LENGTH'],'8')
+            self.assertEqual(kwargs['env']['ENABLE_TORCH_PROFILER'],'1')
+            self.assertTrue(kwargs['start_new_session'])
+            self.f.process(70002,args=self.f.args(8),start='200')
+            self.f.listener(pid=70002)
+            return types.SimpleNamespace(pid=70002)
+        with mock.patch.object(self.r,'validate_launcher'), \
+             mock.patch.object(self.r,'terminate',side_effect=terminate), \
+             mock.patch.object(m.subprocess,'Popen',side_effect=launch), \
+             mock.patch.object(m.time,'sleep'):
+            result=self.r.transition(8,'smallest-canvas')
+        self.assertEqual(signals,[(70001,False)])
+        self.assertTrue(result['ready']);self.assertTrue(result['verified'])
+        self.assertTrue(result['changed']);self.assertEqual(result['canvas_length'],8)
+        self.assertEqual(result['pid'],70002);self.assertEqual(result['starttime'],'200')
+        self.assertEqual(self.r.process(70003)['state'],'T')
+        for canvas in (16,32):
+            with self.subTest(canvas=canvas):
+                current=self.f.process(70002,args=self.f.args(canvas),start='200')
+                attested=self.r.wait_ready(current,canvas,time.monotonic()+1,changed=True)
+                self.assertEqual(attested['canvas_length'],canvas)
+                self.assertTrue(attested['ready']);self.assertTrue(attested['verified'])
+
+    def test_invalid_canvas_configuration_is_not_attested(self):
+        for canvas in (0,7,12,1024,True,'8'):
+            with self.subTest(canvas=canvas):
+                process=self.f.process(args=self.f.args(canvas))
+                with self.assertRaisesRegex(m.Refusal,'Cannot attest owned runtime configuration'):
+                    self.r.api(process)
+
     def test_identity_refusal_matrix(self):
         original=self.f.serving()
         for flag,bad in [('--revision','other'),('--served-model-name','other'),('--host','0.0.0.0'),('--port','8001')]:

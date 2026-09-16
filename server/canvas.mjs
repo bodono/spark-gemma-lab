@@ -17,7 +17,10 @@ export function canvasCommand(
     );
   if (!['status', 'ensure'].includes(action))
     throw Error('Invalid canvas action');
-  if (action === 'ensure' && ![64, 128, 256, 512].includes(canvasLength))
+  if (
+    action === 'ensure' &&
+    ![8, 16, 32, 64, 128, 256, 512].includes(canvasLength)
+  )
     throw Error('Unsupported canvas length');
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -97,6 +100,7 @@ export async function prepareCanvasRuntime(
 ) {
   emit({
     type: 'phase',
+    stage: 'preparing',
     message: `Preparing ${settings.canvas_length}-token diffusion canvas · reloads and warmup are excluded from timing`,
   });
   const attestation = verifyCanvas(
@@ -120,6 +124,7 @@ export async function prepareCanvasRuntime(
     };
   emit({
     type: 'phase',
+    stage: 'preparing',
     message: `Warming ${settings.canvas_length}-token canvas · previews off · excluded from measurements`,
   });
   const model = config.models.find((m) => m.id === 'diffusion');

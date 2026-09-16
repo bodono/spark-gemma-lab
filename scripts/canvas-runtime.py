@@ -2,7 +2,7 @@
 """Owned Spark Lab canvas controller. JSON stdout; human progress stderr.
 
 Usage: python3 canvas-runtime.py status
-       python3 canvas-runtime.py ensure 64|128|256|512
+       python3 canvas-runtime.py ensure 8|16|32|64|128|256|512
 
 No GPU work. A detached worker owns each locked stop/start transition, allowing
 an interrupted SSH client to reconnect safely. Only validated API/EngineCore
@@ -27,7 +27,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-ALLOWED = (64, 128, 256, 512)
+ALLOWED = (8, 16, 32, 64, 128, 256, 512)
 CHECKPOINT = 'RedHatAI/diffusiongemma-26B-A4B-it-FP8-dynamic'
 REVISION = '3b3dae4697494da5a290e9c0461954449e76c4f5'
 SERVED = 'diffusiongemma-fp8'
@@ -558,7 +558,7 @@ def main(argv=None):
     if len(args)==4 and args[0]=='_worker':
         target=int(args[1])
         if target not in ALLOWED:
-            raise Refusal('invalid_canvas','Allowed canvas lengths:64,128,256,512')
+            raise Refusal('invalid_canvas','Allowed canvas lengths:8,16,32,64,128,256,512')
         worker(runtime,target,args[2],int(args[3]))
         return 0
     parser=argparse.ArgumentParser(description=__doc__)

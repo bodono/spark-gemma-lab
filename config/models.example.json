@@ -30,6 +30,9 @@
     "canvas_controller": {
       "ssh_host": "Spark_1",
       "supported_lengths": [
+        8,
+        16,
+        32,
         64,
         128,
         256,

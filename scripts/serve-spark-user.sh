@@ -3,7 +3,7 @@
 set -euo pipefail
 role=${1:?Usage: serve-spark-user.sh diffusion|autoregressive}
 canvas=${CANVAS_LENGTH:-256}
-case "$canvas" in 64|128|256|512) ;; *) echo 'CANVAS_LENGTH must be 64, 128, 256 or 512' >&2; exit 2;; esac
+case "$canvas" in 8|16|32|64|128|256|512) ;; *) echo 'CANVAS_LENGTH must be 8, 16, 32, 64, 128, 256 or 512' >&2; exit 2;; esac
 steps=${MAX_DENOISING_STEPS:-48}
 [[ $steps =~ ^[0-9]+$ ]] && ((steps>=1 && steps<=256)) || { echo "MAX_DENOISING_STEPS must be 1–256" >&2; exit 2; }
 case "$role" in

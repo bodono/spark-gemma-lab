@@ -21,6 +21,11 @@ import {
 } from '@/components/diffusion-preview';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
+  RunProgress,
+  newerProgress,
+  type RunProgressState,
+} from '@/components/run-progress';
+import {
   Table,
   TableHeader,
   TableBody,
@@ -231,6 +236,15 @@ export default function Home() {
   const [inputTokens, setInputTokens] = useState('');
   const [canvasLength, setCanvasLength] = useState(256);
   const [managedDiffusion, setManagedDiffusion] = useState(false);
+  const [runProgress, setRunProgress] = useState<RunProgressState | null>(null);
+  const [remoteActive, setRemoteActive] = useState(false);
+  const [progressConnected, setProgressConnected] = useState(true);
+  const [cancelling, setCancelling] = useState(false);
+  const restoredRunId = useRef<string | null>(null);
+  const reconnectingSince = useRef<string | null>(null);
+  const [, tickProgress] = useState(0);
+  const recoveredRun = useRef<string | null>(null);
+  const progressPanel = useRef<HTMLDivElement | null>(null);
   const [activeDenoising, setActiveDenoising] =
     useState<DenoisingSettings | null>(null);
   const [health, setHealth] = useState<
@@ -262,6 +276,7 @@ export default function Home() {
     [elapsed, setElapsed] = useState(0),
     [history, setHistory] = useState<Run[]>([]),
     [tab, setTab] = useState('demo');
+  const busy = running || remoteActive;
   const displayedDenoising = run
     ? denoisingLabel(run.settings, run.configuration)
     : activeDenoising
@@ -314,6 +329,119 @@ export default function Home() {
     );
     return () => clearInterval(id);
   }, [running]);
+  useEffect(() => {
+    if (!bridge) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const controller = new AbortController();
+    const poll = async () => {
+      try {
+        const response = await fetch(api() + '/api/activity', {
+          signal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(5000),
+          ]),
+        });
+        if (!response.ok) throw Error('Progress unavailable');
+        const activity = (await response.json()) as {
+          active: boolean;
+          progress?: RunProgressState | null;
+        };
+        if (stopped) return;
+        setRemoteActive(activity.active);
+        setProgressConnected(true);
+        if (activity.progress) {
+          const progress = activity.progress;
+          if (
+            reconnectingSince.current &&
+            progress.started_at >= reconnectingSince.current
+          ) {
+            setError('');
+            setPhase(progress.message);
+            reconnectingSince.current = null;
+          }
+          setRunProgress((previous) => newerProgress(previous, progress));
+          if (!running && activity.active) {
+            if (recoveredRun.current !== progress.started_at)
+              setTab(progress.kind === 'profile' ? 'profile' : 'demo');
+            recoveredRun.current = progress.started_at;
+          }
+          if (
+            !running &&
+            !activity.active &&
+            (recoveredRun.current === progress.started_at ||
+              (progress.run_id && restoredRunId.current !== progress.run_id))
+          ) {
+            setPhase(progress.message);
+            if (progress.run_id) {
+              const saved = await fetch(
+                api() + '/api/runs/' + progress.run_id,
+                { signal: controller.signal },
+              );
+              if (!saved.ok) throw Error('Saved run unavailable');
+              const finished = (await saved.json()) as Run;
+              if (stopped) return;
+              setRun(finished);
+              setRunSynthetic(finished.synthetic);
+              setSummaries(finished.summaries);
+              setResults(finished.results);
+              setActiveDenoising(finished.settings ?? null);
+              restoredRunId.current = progress.run_id;
+              if (recoveredRun.current === progress.started_at)
+                setTab(finished.kind === 'profile' ? 'profile' : 'demo');
+            }
+            recoveredRun.current = null;
+          }
+        }
+      } catch {
+        if (!stopped) setProgressConnected(false);
+      } finally {
+        if (!stopped) timer = setTimeout(poll, 1000);
+      }
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [bridge, running]);
+  useEffect(() => {
+    if (!busy) {
+      setCancelling(false);
+      return;
+    }
+    const timer = setInterval(() => tickProgress((value) => value + 1), 1000);
+    return () => clearInterval(timer);
+  }, [busy]);
+  useEffect(() => {
+    if (running && tab === 'profile')
+      progressPanel.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      });
+  }, [running, tab]);
+  async function stopRun() {
+    if (runProgress?.kind !== 'profile') {
+      ctrl.current?.abort();
+      return;
+    }
+    setCancelling(true);
+    try {
+      const response = await fetch(api() + '/api/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ started_at: runProgress.started_at }),
+      });
+      if (!response.ok) {
+        const body = (await response.json()) as { error?: string };
+        throw Error(body.error || 'Unable to cancel the sweep');
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+      setCancelling(false);
+    }
+  }
   async function execute(kind: string) {
     const requestedInput =
       kind === 'profile' && inputTokens !== '' ? Number(inputTokens) : null;
@@ -355,6 +483,21 @@ export default function Home() {
     setRun(null);
     setSelected(0);
     setRunning(true);
+    setCancelling(false);
+    const startedAt = new Date().toISOString();
+    setRunProgress({
+      kind: kind as 'demo' | 'profile',
+      stage: 'preparing',
+      message: kind === 'profile' ? 'Starting sweep…' : 'Starting comparison…',
+      started_at: startedAt,
+      updated_at: startedAt,
+      completed_requests: 0,
+      total_requests: 0,
+      warmup_completed_requests: 0,
+      warmup_total_requests: 0,
+      failed_requests: 0,
+    });
+    setProgressConnected(true);
     start.current = performance.now();
     setElapsed(0);
     setPhase(
@@ -362,6 +505,8 @@ export default function Home() {
     );
     const c = new AbortController();
     ctrl.current = c;
+    let receivedServerProgress = false;
+    let serverReportedError = false;
     try {
       const response = await fetch(api() + '/api/run', {
         method: 'POST',
@@ -388,11 +533,13 @@ export default function Home() {
           ...denoising,
         }),
       });
-      if (!response.ok)
+      if (!response.ok) {
+        serverReportedError = true;
         throw Error(
           ((await response.json()) as { error?: string }).error ||
             response.statusText,
         );
+      }
       if (!response.body) throw Error('No stream returned');
       const reader = response.body.getReader(),
         decoder = new TextDecoder();
@@ -410,6 +557,10 @@ export default function Home() {
             if (!line) continue;
             const e = JSON.parse(line.slice(6));
             if (e.type === 'phase') setPhase(e.message);
+            if (e.type === 'progress') {
+              receivedServerProgress = true;
+              setRunProgress((previous) => newerProgress(previous, e.progress));
+            }
             if (e.type === 'start')
               setResults((p) => [
                 ...p.filter(
@@ -500,7 +651,10 @@ export default function Home() {
                     : 'Run finished with errors',
               );
             }
-            if (e.type === 'error') throw Error(e.message);
+            if (e.type === 'error') {
+              serverReportedError = true;
+              throw Error(e.message);
+            }
           }
           if (done) break;
         }
@@ -513,21 +667,45 @@ export default function Home() {
         reader.releaseLock();
       }
     } catch (e) {
-      setError(
-        e instanceof Error
-          ? e.name === 'AbortError'
-            ? 'Run cancelled.'
-            : e.message
-          : String(e),
+      const transportFailure = !serverReportedError && !c.signal.aborted;
+      const recovering =
+        kind === 'profile' && transportFailure && receivedServerProgress;
+      const message = c.signal.aborted
+        ? 'Run cancelled.'
+        : e instanceof Error
+          ? e.message
+          : String(e);
+      setError(recovering ? '' : message);
+      setPhase(
+        recovering
+          ? 'Connection interrupted. Reconnecting to sweep…'
+          : 'Stopped',
       );
-      setPhase('Stopped');
-      setResults((previous) =>
-        previous.map((result) =>
-          result.status === 'running'
-            ? { ...result, status: 'cancelled' }
-            : result,
-        ),
-      );
+      if (transportFailure) {
+        reconnectingSince.current = startedAt;
+        setProgressConnected(false);
+      }
+      // Server snapshots stay authoritative. A local transport error must never
+      // supersede a completed run with a newer client-generated timestamp.
+      if (!receivedServerProgress)
+        setRunProgress((previous) =>
+          previous && !previous.run_status
+            ? {
+                ...previous,
+                stage: c.signal.aborted ? 'cancelled' : 'error',
+                message,
+                updated_at: new Date().toISOString(),
+              }
+            : previous,
+        );
+      if (!recovering)
+        setResults((previous) =>
+          previous.map((result) =>
+            result.status === 'running'
+              ? { ...result, status: 'cancelled' }
+              : result,
+          ),
+        );
     } finally {
       setRunning(false);
       ctrl.current = null;
@@ -567,6 +745,7 @@ export default function Home() {
   }
   const ready = bridge && models.every((m) => health[m.id]?.ok);
   const canRun =
+    !busy &&
     bridge &&
     models.every(
       (m) => health[m.id]?.ok || (m.id === 'diffusion' && managedDiffusion),
@@ -661,6 +840,23 @@ export default function Home() {
             {running ? `${fmt(elapsed, 2)} s elapsed` : 'LOCAL WORKSPACE'}
           </span>
         </div>
+        {(busy || runProgress?.kind === 'profile') && (
+          <div ref={progressPanel} className="run-progress-container">
+            {runProgress ? (
+              <RunProgress
+                progress={runProgress}
+                active={busy}
+                connected={progressConnected}
+                onCancel={() => void stopRun()}
+                cancelling={cancelling}
+              />
+            ) : (
+              <p className="notice" role="status">
+                A run is already active. Waiting for progress…
+              </p>
+            )}
+          </div>
+        )}
         <TabsContent value="demo">
           <section className="promptbox">
             <label className="field-title" htmlFor="prompt">
@@ -670,7 +866,7 @@ export default function Home() {
               id="prompt"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              disabled={running}
+              disabled={busy}
               className="prompt"
             />
             <div className="controls">
@@ -683,7 +879,7 @@ export default function Home() {
                   max={128}
                   value={batch}
                   onChange={(e) => setBatch(+e.target.value)}
-                  disabled={running}
+                  disabled={busy}
                 />
               </label>
               <label>
@@ -695,7 +891,7 @@ export default function Home() {
                   max={contextBudget - 1}
                   value={tokens}
                   onChange={(e) => setTokens(+e.target.value)}
-                  disabled={running}
+                  disabled={busy}
                 />
               </label>
               <label>
@@ -704,9 +900,9 @@ export default function Home() {
                   aria-label="Diffusion canvas tokens"
                   value={canvasLength}
                   onChange={(e) => setCanvasLength(Number(e.target.value))}
-                  disabled={running}
+                  disabled={busy}
                 >
-                  {[64, 128, 256, 512].map((size) => (
+                  {[8, 16, 32, 64, 128, 256, 512].map((size) => (
                     <option key={size} value={size}>
                       {size}
                       {size === 256 ? ' (default)' : ''}
@@ -724,7 +920,7 @@ export default function Home() {
                   step={0.1}
                   value={temp}
                   onChange={(e) => setTemp(+e.target.value)}
-                  disabled={running}
+                  disabled={busy}
                 />
               </label>
               <label>
@@ -735,14 +931,19 @@ export default function Home() {
                   min={0}
                   value={seed}
                   onChange={(e) => setSeed(+e.target.value)}
-                  disabled={running}
+                  disabled={busy}
                 />
               </label>
               <div className="action">
                 {running ? (
                   <Button
                     variant="outline"
-                    onClick={() => ctrl.current?.abort()}
+                    onClick={() => void stopRun()}
+                    disabled={
+                      cancelling ||
+                      (runProgress?.kind === 'profile' &&
+                        !runProgress.run_status)
+                    }
                   >
                     <Square />
                     Stop
@@ -851,7 +1052,7 @@ export default function Home() {
                           <input
                             type="checkbox"
                             checked={liveDiffusionPreview}
-                            disabled={running}
+                            disabled={busy}
                             onChange={(event) =>
                               setLiveDiffusionPreview(event.target.checked)
                             }
@@ -1017,7 +1218,7 @@ export default function Home() {
                     placeholder="Original length"
                     value={inputTokens}
                     onChange={(e) => setInputTokens(e.target.value)}
-                    disabled={running}
+                    disabled={busy}
                     aria-describedby="input-length-help"
                   />
                 </label>
@@ -1030,14 +1231,14 @@ export default function Home() {
                     max={contextBudget - 1}
                     value={tokens}
                     onChange={(e) => setTokens(+e.target.value)}
-                    disabled={running}
+                    disabled={busy}
                   />
                 </label>
               </div>
               <p className="method-note" id="input-length-help">
-                Set input length to trim or repeat the source text before timing.
-                Leave blank for its original length. Chat formatting adds tokens;
-                actual totals appear in the results.
+                Set input length to trim or repeat the source text before
+                timing. Leave blank for its original length. Chat formatting
+                adds tokens; actual totals appear in the results.
               </p>
               <p>
                 Matched prompts, warmups, repeated waves. Live diffusion
@@ -1049,9 +1250,9 @@ export default function Home() {
                   aria-label="Diffusion canvas tokens"
                   value={canvasLength}
                   onChange={(e) => setCanvasLength(Number(e.target.value))}
-                  disabled={running}
+                  disabled={busy}
                 >
-                  {[64, 128, 256, 512].map((size) => (
+                  {[8, 16, 32, 64, 128, 256, 512].map((size) => (
                     <option key={size} value={size}>
                       {size}
                       {size === 256 ? ' (default)' : ''}
@@ -1069,7 +1270,7 @@ export default function Home() {
                 <Input
                   value={batches}
                   onChange={(e) => setBatches(e.target.value)}
-                  disabled={running}
+                  disabled={busy}
                 />
               </label>
               <div className="twocol">
@@ -1080,7 +1281,7 @@ export default function Home() {
                     onChange={(e) =>
                       setProfileDenoisingMode(e.target.value as DenoisingMode)
                     }
-                    disabled={running}
+                    disabled={busy}
                   >
                     <option value="adaptive">Adaptive (max 48)</option>
                     <option value="fixed">Fixed step count</option>
@@ -1097,7 +1298,7 @@ export default function Home() {
                       step={1}
                       value={fixedDenoisingSteps}
                       onChange={(e) => setFixedDenoisingSteps(+e.target.value)}
-                      disabled={running}
+                      disabled={busy}
                     />
                   </label>
                 )}
@@ -1117,7 +1318,7 @@ export default function Home() {
                     max={10000}
                     value={requestCount}
                     onChange={(e) => setRequestCount(+e.target.value)}
-                    disabled={running}
+                    disabled={busy}
                   />
                 </label>
                 <label>
@@ -1128,14 +1329,14 @@ export default function Home() {
                     max={10}
                     value={warmups}
                     onChange={(e) => setWarmups(+e.target.value)}
-                    disabled={running}
+                    disabled={busy}
                   />
                 </label>
               </div>
               <p className="method-note">
-                Input, formatting and output must fit the {fmt(contextBudget, 0)}-token
-                context. Repeated excerpts are recorded as repeated text, not
-                longer book passages.
+                Input, formatting and output must fit the{' '}
+                {fmt(contextBudget, 0)}-token context. Repeated excerpts are
+                recorded as repeated text, not longer book passages.
               </p>
               <div className="twocol">
                 <label>
@@ -1143,7 +1344,7 @@ export default function Home() {
                   <select
                     value={workload}
                     onChange={(e) => setWorkload(e.target.value)}
-                    disabled={running}
+                    disabled={busy}
                   >
                     <option value="continuation">
                       Continue passage (chat)
@@ -1156,7 +1357,7 @@ export default function Home() {
                   <select
                     value={outputMode}
                     onChange={(e) => setOutputMode(e.target.value)}
-                    disabled={running}
+                    disabled={busy}
                   >
                     <option value="natural">Natural EOS / token limit</option>
                     <option value="fixed">Force token count</option>
@@ -1168,7 +1369,7 @@ export default function Home() {
                 <input
                   type="file"
                   accept=".jsonl,.ndjson"
-                  disabled={running}
+                  disabled={busy}
                   onChange={(e) =>
                     e.target.files?.[0] && loadDataset(e.target.files[0])
                   }
@@ -1176,7 +1377,7 @@ export default function Home() {
               </label>
               <Button
                 variant="outline"
-                disabled={running || !bridge}
+                disabled={busy || !bridge}
                 onClick={loadPreparedDataset}
               >
                 Use prepared PG19 bank
@@ -1191,7 +1392,7 @@ export default function Home() {
                 {dataset.length > 0 && (
                   <Button
                     variant="ghost"
-                    disabled={running}
+                    disabled={busy}
                     onClick={() => {
                       setDataset([]);
                       setDatasetName('Current prompt');
@@ -1210,10 +1411,17 @@ export default function Home() {
                 divide evenly by each batch size. Warmups are excluded. Start
                 with 1, 2, 4 while checking GPU memory.
               </p>
-              {running ? (
-                <Button variant="outline" onClick={() => ctrl.current?.abort()}>
+              {busy && (running || runProgress?.kind === 'profile') ? (
+                <Button
+                  variant="outline"
+                  onClick={() => void stopRun()}
+                  disabled={
+                    cancelling ||
+                    (runProgress?.kind === 'profile' && !runProgress.run_status)
+                  }
+                >
                   <Square />
-                  Stop sweep
+                  {cancelling ? 'Stopping…' : 'Stop sweep'}
                 </Button>
               ) : (
                 <Button disabled={!canRun} onClick={() => execute('profile')}>
@@ -1222,7 +1430,8 @@ export default function Home() {
                 </Button>
               )}
               <p className="phase">
-                {phase} · {displayedDenoising}
+                {busy && runProgress ? runProgress.message : phase} ·{' '}
+                {displayedDenoising}
               </p>
             </section>
             <section className="chart-panel">

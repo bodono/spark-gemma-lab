@@ -1,3 +1,4 @@
+import { createProgress } from './progress.mjs';
 import http from 'node:http';
 import { readFile, mkdir, writeFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,7 @@ const configPath =
 const synthetic = process.env.SPARK_LAB_MOCK === '1';
 const port = Number(process.env.SPARK_LAB_PORT || 8787);
 let active = null;
+let lastProgress = null;
 await mkdir(resultsDir, { recursive: true });
 const getConfig = async () => JSON.parse(await readFile(configPath, 'utf8'));
 const json = (res, status, body) => {
@@ -80,7 +82,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/activity') {
-      json(res, 200, { active: Boolean(active) });
+      json(res, 200, { active: Boolean(active), progress: lastProgress });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/health') {
@@ -170,6 +172,59 @@ const server = http.createServer(async (req, res) => {
       }
       return;
     }
+    if (req.method === 'POST' && url.pathname === '/api/cancel') {
+      if (!active || !lastProgress) {
+        json(res, 409, { error: 'No active experiment to cancel.' });
+        return;
+      }
+      if (!req.headers['content-type']?.startsWith('application/json')) {
+        json(res, 415, { error: 'Use application/json' });
+        return;
+      }
+      let cancellation;
+      try {
+        const chunks = [];
+        let bytes = 0;
+        for await (const chunk of req) {
+          bytes += chunk.length;
+          if (bytes > 4096) throw Error('Cancellation payload exceeds 4 KB');
+          chunks.push(chunk);
+        }
+        cancellation = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (
+          !cancellation ||
+          Array.isArray(cancellation) ||
+          Object.keys(cancellation).length !== 1 ||
+          typeof cancellation.started_at !== 'string'
+        )
+          throw Error(
+            'Supply only started_at from the active progress snapshot.',
+          );
+      } catch {
+        json(res, 400, {
+          error: 'Supply JSON with only the active progress started_at.',
+        });
+        return;
+      }
+      // Check after reading the body: an older run may have finished and a new
+      // one may have started while this cancellation request was in flight.
+      if (
+        !active ||
+        !lastProgress ||
+        cancellation.started_at !== lastProgress.started_at
+      ) {
+        json(res, 409, {
+          error:
+            'The active experiment changed; refresh its progress before cancelling.',
+        });
+        return;
+      }
+      active.abort();
+      // Cancellation is cooperative. Keep the lock until inference and result
+      // persistence settle; the terminal progress event reports completion.
+      json(res, 202, { accepted: true, started_at: lastProgress.started_at });
+      return;
+    }
     if (req.method === 'POST' && url.pathname === '/api/run') {
       if (active) {
         json(res, 409, {
@@ -183,10 +238,25 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       active = new AbortController();
+      lastProgress = null;
       const controller = active;
       let started = false;
+      let surviveDisconnect = false;
+      let progress;
+      const emit = (e) => {
+        if (e.type === 'progress') lastProgress = e.progress;
+        if (!started) return;
+        // Drop only optional preview frames when a browser falls behind.
+        if (
+          e.type === 'preview' &&
+          !e.preview.unavailable &&
+          res.writableLength > 65536
+        )
+          return;
+        if (!res.destroyed) res.write('data: ' + JSON.stringify(e) + '\n\n');
+      };
       res.on('close', () => {
-        if (!res.writableEnded) controller.abort();
+        if (!res.writableEnded && !surviveDisconnect) controller.abort();
       });
       try {
         const bodyChunks = [];
@@ -198,7 +268,11 @@ const server = http.createServer(async (req, res) => {
         }
         const raw = Buffer.concat(bodyChunks).toString('utf8');
         const settings = validate(JSON.parse(raw));
+        // Profiling belongs to the bridge, so browser refresh/disconnect must
+        // not end the experiment. Demos retain disconnect-to-cancel behavior.
+        surviveDisconnect = settings.kind === 'profile';
         const config = await getConfig();
+        progress = createProgress(settings, config.models.length, emit);
         if (
           settings.input_tokens != null &&
           config.runtime?.max_model_len &&
@@ -224,17 +298,7 @@ const server = http.createServer(async (req, res) => {
         });
         started = true;
         res.flushHeaders();
-        const emit = (e) => {
-          // Slow browsers may miss provisional frames; never let them build an
-          // unbounded telemetry backlog ahead of the authoritative completion.
-          if (
-            e.type === 'preview' &&
-            !e.preview.unavailable &&
-            res.writableLength > 65536
-          )
-            return;
-          if (!res.destroyed) res.write('data: ' + JSON.stringify(e) + '\n\n');
-        };
+        emit({ type: 'progress', progress: progress.snapshot });
         const heartbeat = setInterval(() => {
           if (!res.destroyed) res.write(': keepalive\n\n');
         }, 15000);
@@ -244,6 +308,7 @@ const server = http.createServer(async (req, res) => {
             emit,
             synthetic,
             prepareRuntime: prepareCanvasRuntime,
+            progressTracker: progress,
           });
           await writeFile(
             path.join(resultsDir, run.id + '.json'),
@@ -255,14 +320,16 @@ const server = http.createServer(async (req, res) => {
               .map((r) => JSON.stringify({ ...r, run_id: run.id, synthetic }))
               .join('\n') + '\n',
           );
+          progress.finish(run);
           emit({ type: 'complete', run });
           res.end();
         } finally {
           clearInterval(heartbeat);
         }
       } catch (e) {
+        progress?.fail(controller.signal.aborted);
         if (!started) json(res, 400, { error: e.message });
-        else {
+        else if (!res.destroyed) {
           res.write(
             'data: ' +
               JSON.stringify({ type: 'error', message: e.message }) +
