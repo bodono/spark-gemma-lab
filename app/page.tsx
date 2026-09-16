@@ -16,6 +16,11 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import {
+  TokenProbabilityText,
+  TokenProbabilityLegend,
+  type TokenProbabilities,
+} from '@/components/token-probabilities';
+import {
   DiffusionPreview,
   type DiffusionPrediction,
 } from '@/components/diffusion-preview';
@@ -56,6 +61,7 @@ type DenoisingSettings = {
   denoising_mode?: DenoisingMode;
   denoising_steps?: number;
   diffusion_preview?: boolean;
+  ar_token_probabilities?: boolean;
   input_tokens?: number | null;
   canvas_length?: number;
 };
@@ -92,6 +98,7 @@ type Result = {
   denoising?: Denoising;
   preview?: DiffusionPrediction;
   previewUnavailable?: string;
+  ar_token_probabilities?: TokenProbabilities;
   diffusion_preview?: {
     enabled: boolean;
     received_frames: number;
@@ -227,6 +234,7 @@ export default function Home() {
   ]);
   const [runSynthetic, setRunSynthetic] = useState(false);
   const [liveDiffusionPreview, setLiveDiffusionPreview] = useState(true);
+  const [showTokenProbabilities, setShowTokenProbabilities] = useState(true);
   const [activePreview, setActivePreview] = useState(false);
   const [previewRun, setPreviewRun] = useState(0);
   const [contextBudget, setContextBudget] = useState(8192);
@@ -530,6 +538,7 @@ export default function Home() {
           workload,
           output_mode: outputMode,
           diffusion_preview: wantPreview,
+          ar_token_probabilities: kind === 'demo' && showTokenProbabilities,
           ...denoising,
         }),
       });
@@ -594,6 +603,40 @@ export default function Home() {
                       }
                     : r,
                 ),
+              );
+            if (
+              e.type === 'token_probabilities' &&
+              e.model === 'autoregressive'
+            )
+              setResults((previous) =>
+                previous.map((result) => {
+                  if (
+                    result.model !== e.model ||
+                    result.index !== e.index ||
+                    result.request_id !== e.request_id ||
+                    result.status !== 'running'
+                  )
+                    return result;
+                  return {
+                    ...result,
+                    ar_token_probabilities: {
+                      version: e.version,
+                      status: e.status,
+                      reason: e.reason,
+                      source: e.source,
+                      logprobs_mode: e.logprobs_mode,
+                      offset_unit: e.offset_unit,
+                      tokens: [
+                        ...(result.ar_token_probabilities?.tokens ?? []),
+                        ...(e.tokens ?? []),
+                      ],
+                      spans: [
+                        ...(result.ar_token_probabilities?.spans ?? []),
+                        ...(e.spans ?? []),
+                      ],
+                    },
+                  };
+                }),
               );
             if (e.type === 'result')
               setResults((p) => [
@@ -1060,6 +1103,22 @@ export default function Home() {
                           Live diffusion preview
                         </label>
                       )}
+                      {m.id === 'autoregressive' && (
+                        <label
+                          className="animation-toggle probability-toggle"
+                          title="Color sampled tokens by their raw model probability. Always disabled for profiling."
+                        >
+                          <input
+                            type="checkbox"
+                            checked={showTokenProbabilities}
+                            disabled={busy}
+                            onChange={(event) =>
+                              setShowTokenProbabilities(event.target.checked)
+                            }
+                          />
+                          Token probabilities
+                        </label>
+                      )}
                     </div>
                   </div>
                   <div className="metrics">
@@ -1104,7 +1163,14 @@ export default function Home() {
                       <p className="error">{r.error}</p>
                     ) : r?.text || showRefinement ? (
                       <div className="response-text">
-                        {r?.text}
+                        {m.id === 'autoregressive' && showTokenProbabilities ? (
+                          <TokenProbabilityText
+                            text={r?.text ?? ''}
+                            data={r?.ar_token_probabilities}
+                          />
+                        ) : (
+                          r?.text
+                        )}
                         {showRefinement && (
                           <DiffusionPreview
                             key={`${previewRun}:${selected}:${r!.preview!.block_index}`}
@@ -1154,6 +1220,12 @@ export default function Home() {
                     </div>
                   )}
                   {m.id === 'diffusion' && <DenoisingReadout result={r} />}
+                  {m.id === 'autoregressive' && showTokenProbabilities && (
+                    <TokenProbabilityLegend
+                      data={r?.ar_token_probabilities}
+                      running={r?.status === 'running'}
+                    />
+                  )}
                   <footer>
                     <span
                       className={
@@ -1195,11 +1267,14 @@ export default function Home() {
             these can change until a block is committed and do not count as
             output tokens or first committed output. Demo timings include any
             preview overhead{displayedPreview ? ' (enabled for this demo)' : ''}
-            . Profiling always disables preview collection. The
-            after-first-block rate excludes prefill and the entire first output
-            block; it is unavailable for a single block. Batch size dispatches
-            that many concurrent requests per model; the inference scheduler
-            controls the actual GPU batch.
+            . AR token colors show raw model probabilities, with red for low,
+            orange for intermediate and green for high likelihood. Hover for
+            exact values. Demo timings include probability collection when
+            enabled. Profiling always disables previews and token probability
+            collection. The after-first-block rate excludes prefill and the
+            entire first output block; it is unavailable for a single block.
+            Batch size dispatches that many concurrent requests per model; the
+            inference scheduler controls the actual GPU batch.
           </p>
         </TabsContent>
         <TabsContent value="profile">

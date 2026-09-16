@@ -450,6 +450,61 @@ h2 span {
   width: 13px;
   height: 13px;
 }
+.probability-toggle {
+  color: #536859;
+}
+.probability-toggle input {
+  accent-color: #209751;
+}
+.probability-token {
+  border-radius: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  padding: 1px 0;
+}
+.probability-neutral {
+  box-shadow: inset 0 -1px #b8bbb9;
+}
+.probability-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 0 24px 16px;
+  color: #64706a;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.probability-legend small {
+  font-size: inherit;
+}
+.probability-scale {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: #49564e;
+}
+.probability-swatch {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  margin-left: 8px;
+}
+.probability-swatch:first-child {
+  margin-left: 0;
+}
+.probability-swatch.low {
+  background: rgb(213 53 48 / 14%);
+  box-shadow: inset 0 0 0 1px rgb(213 53 48 / 30%);
+}
+.probability-swatch.mid {
+  background: rgb(227 137 24 / 14%);
+  box-shadow: inset 0 0 0 1px rgb(227 137 24 / 30%);
+}
+.probability-swatch.high {
+  background: rgb(32 151 81 / 14%);
+  box-shadow: inset 0 0 0 1px rgb(32 151 81 / 30%);
+}
 .diffusion-preview {
   font: inherit;
   letter-spacing: inherit;

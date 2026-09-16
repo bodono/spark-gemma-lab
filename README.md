@@ -6,6 +6,7 @@ Run DiffusionGemma and autoregressive Gemma 4 side by side on two NVIDIA DGX Spa
 - Batch size defaults to 1 and is configurable as concurrent requests.
 - Adaptive diffusion demos with actual steps reported for each committed block.
 - Optional live intermediate predictions, clearly separated from committed output.
+- AR token probabilities: translucent red → orange → green highlights with exact values on hover.
 - Configurable prompt, input/output lengths and diffusion canvas size.
 - Profiling sweeps, PG19 preparation, JSON/JSONL evidence, CSV and plots.
 
@@ -109,6 +110,10 @@ The demo uses adaptive convergence with a **maximum of 48 denoising steps per bl
 Canvas size defaults to **256 tokens**, with 8, 16, 32, 64, 128 and 512 available in both demo and profiling views. Changing it reloads the owned Diffusion server and warms the new runtime before measurement; allow a few minutes. Nondefault sizes are experimental. AR is unaffected. The output limit and canvas size are separate settings.
 
 Live previews display provisional token predictions and may add latency. They never count as completion tokens or first visible committed output. Turn previews off for cleaner timing comparisons. Profiling and all warmups always disable preview capture.
+
+**Token probabilities** is enabled by default for AR demos. Each sampled token gets a translucent box on a continuous probability scale: red at 0%, orange at 50%, green at 100%. Hover to inspect the exact probability and log probability. These are `exp(logprob)` from vLLM's raw model distribution, before temperature/top-k/top-p; they describe the likelihood of the selected token, not whether the answer is correct. The bridge requests `logprobs: true, top_logprobs: 0` only for demo AR requests. Turn the checkbox off to omit collection. Profiling and all warmups always omit it, and demo timings include any collection overhead.
+
+Token boundaries need not match words. Output text and spacing stay unchanged; missing scores or unverified text alignment stay neutral. If several token fragments decode into one Unicode character, its hover readout lists the contributing probabilities without inventing a single character probability. Selected-token records and their verified text spans are included in the exported run.
 
 ## Profile and plot
 

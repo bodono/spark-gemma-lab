@@ -1,3 +1,7 @@
+import {
+  appendProbabilityDelta,
+  interruptedProbabilities,
+} from './probabilities.mjs';
 import { createProgress } from './progress.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { collectCompletion } from './stream.mjs';
@@ -34,6 +38,13 @@ export function validate(input) {
     typeof input.diffusion_preview !== 'boolean'
   )
     throw Error('diffusion_preview must be a boolean');
+  if (
+    input.ar_token_probabilities !== undefined &&
+    typeof input.ar_token_probabilities !== 'boolean'
+  )
+    throw Error('ar_token_probabilities must be a boolean');
+  x.ar_token_probabilities =
+    input.kind === 'demo' && input.ar_token_probabilities === true;
   // Profiling, including its warmups, must never request intermediate snapshots.
   x.diffusion_preview =
     input.kind === 'demo' && input.diffusion_preview === true;
@@ -183,6 +194,8 @@ export async function runExperiment(
     ...settings,
     diffusion_preview:
       settings.kind === 'demo' && settings.diffusion_preview === true,
+    ar_token_probabilities:
+      settings.kind === 'demo' && settings.ar_token_probabilities === true,
   };
   const publish = emit;
   const progress =
@@ -253,6 +266,8 @@ export async function runExperiment(
           'Native Diffusion canvas length is verified before timing. Changes restart only the owned Diffusion server and trigger an unmeasured warmup; other sizes are experimental. AR is unaffected.',
         sampler_note:
           'Temperature and seed apply only to AR. Diffusion uses its required schedule; vLLM rejects these per-request overrides.',
+        probability_note:
+          'Optional AR sampled-token probabilities are demo-only, use raw model log probabilities from the native runtime, and may add overhead. Profiling and all warmups omit logprobs. Display spans require exact text attribution; they are not probabilities of correctness.',
         preview_note:
           'Live intermediate predictions are opt-in for demos only. They are not completion tokens or first real output. Demo timings include any collection/transport overhead. Profiling and its warmups explicitly disable GPU snapshot collection.',
         denoising_note:
@@ -315,6 +330,11 @@ export async function runExperiment(
                 settings.diffusion_preview === true &&
                 model.id === 'diffusion' &&
                 !warmup;
+              const allowTokenProbabilities =
+                settings.kind === 'demo' &&
+                settings.ar_token_probabilities === true &&
+                model.id === 'autoregressive' &&
+                !warmup;
               const requestId = randomUUID(),
                 requestStart = performance.now();
               const base = {
@@ -361,6 +381,9 @@ export async function runExperiment(
                   : { temperature: settings.temperature, seed: settings.seed }),
                 stream: true,
                 return_token_ids: true,
+                ...(allowTokenProbabilities
+                  ? { logprobs: true, top_logprobs: 0 }
+                  : {}),
                 stream_options: {
                   include_usage: true,
                   continuous_usage_stats: true,
@@ -370,7 +393,23 @@ export async function runExperiment(
                   : {}),
               };
               base.request_payload = payload;
-              let result;
+              let result,
+                probabilitySnapshot,
+                probabilityFinal = false;
+              const receiveProbabilities = (delta) => {
+                probabilityFinal = delta.final === true;
+                probabilitySnapshot = appendProbabilityDelta(
+                  probabilitySnapshot,
+                  delta,
+                );
+                emit({
+                  type: 'token_probabilities',
+                  model: model.id,
+                  index,
+                  request_id: requestId,
+                  ...delta,
+                });
+              };
               const received = [];
               try {
                 signal.throwIfAborted();
@@ -401,6 +440,8 @@ export async function runExperiment(
                 const measured = await collectCompletion(response.body, {
                   start: requestStart,
                   previewEnabled: allowPreview,
+                  tokenProbabilitiesEnabled: allowTokenProbabilities,
+                  emitTokenProbabilities: receiveProbabilities,
                   emitPreview: (preview) =>
                     emit({
                       type: 'preview',
@@ -477,6 +518,16 @@ export async function runExperiment(
                       : null,
                 };
               } catch (e) {
+                if (allowTokenProbabilities && !probabilityFinal) {
+                  probabilitySnapshot =
+                    interruptedProbabilities(probabilitySnapshot);
+                  receiveProbabilities({
+                    ...probabilitySnapshot,
+                    tokens: [],
+                    spans: [],
+                    final: true,
+                  });
+                }
                 result = {
                   ...base,
                   text: received.map((chunk) => chunk.text).join(''),
@@ -489,6 +540,9 @@ export async function runExperiment(
                   completion_tokens: null,
                   input_length_ok: expectedInput ? false : null,
                   tokens_per_second: null,
+                  ...(allowTokenProbabilities
+                    ? { ar_token_probabilities: probabilitySnapshot }
+                    : {}),
                   ...(model.id === 'diffusion'
                     ? {
                         denoising: {
